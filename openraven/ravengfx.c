@@ -1,4 +1,4 @@
-// ravengfx.so - graphics settings shim for Halo: Fireteam Raven (v3.11).
+// ravengfx.so - graphics settings shim for Halo: Fireteam Raven (3.11-dec build).
 // Preloaded next to rio2pad.so. Kept separate so input and graphics work don't collide.
 //
 // The engine reads its render options (MSAA, SMAA, FXAA, ANISOTROPY_LEVEL, shadows, ...) from the

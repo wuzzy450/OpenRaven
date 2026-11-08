@@ -12,7 +12,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <dlfcn.h>
+#include <strings.h>
 #include <unordered_map>
 #include "fsr2/src/ffx_fsr2.h"
 #include "fsr2/src/gl/ffx_fsr2_gl.h"
@@ -25,12 +25,23 @@ unsigned ravengl_unit_tex(int unit);
 }
 
 typedef unsigned GLuint; typedef int GLint; typedef unsigned GLenum;
+#ifdef _WIN32
+// Windows loader (openraven/win): GL comes from gl_resolve (real Windows functions), settings from
+// the Win32 environment, messages go to ravenloader.log. Built by win/Makefile.
+extern "C" { void *gl_resolve(const char *name); void raven_log(const char *fmt, ...); const char *raven_env(const char *name); }
+static void *gpa(const char *n) { return gl_resolve(n); }
+#define getenv raven_env
+#define fprintf(f, ...) raven_log(__VA_ARGS__)
+#define clock_gettime(clk, ts) timespec_get(ts, TIME_UTC)  // frame time delta only
+#else
+#include <dlfcn.h>
 static void *gpa(const char *n) {
     static void *(*g)(const char *);
     if (!g) g = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "glXGetProcAddressARB");
     void *f = g ? g(n) : nullptr;
     return f ? f : dlsym(RTLD_DEFAULT, n);
 }
+#endif
 static ffx_glProc ffx_gpa(const char *n) { return (ffx_glProc)gpa(n); }
 
 #define F(ret, name, args) static ret (*name) args;
@@ -48,10 +59,10 @@ F(void, gActiveTexture, (GLenum))
 F(void, gBindTexture, (GLenum, GLuint))
 F(void, gBindSampler, (GLuint, GLuint))
 F(void, gBindBufferBase, (GLenum, GLuint, GLuint))
-F(void, gBindBufferRange, (GLenum, GLuint, GLuint, long, long))
+F(void, gBindBufferRange, (GLenum, GLuint, GLuint, long long, long long))
 F(void, gBindBuffer, (GLenum, GLuint))
 F(void, gMemoryBarrier, (unsigned))
-F(void, gGetIntegeri_v64, (GLenum, GLuint, long *))
+F(void, gGetIntegeri_v64, (GLenum, GLuint, long long *))
 
 enum { K_OTHER = 1, K_TAA, K_TONE, K_GBUF };
 struct ProgInfo { int kind; GLint loc_mvp = -1, loc_nj = -1, loc_invp = -1; };
@@ -205,7 +216,7 @@ static bool make_ctx(int rw, int rh, int dw, int dh, int flags)
 }
 
 // Save/restore the GL state the FSR backend touches.
-struct Saved { GLint prog, active, tex[32], smp[32], ubo[24]; long uoff[24], usz[24]; GLint ubo_generic; };
+struct Saved { GLint prog, active, tex[32], smp[32], ubo[24]; long long uoff[24], usz[24]; GLint ubo_generic; };
 static void save(Saved &s)
 {
     gGetIntegerv(0x8B8D, &s.prog); gGetIntegerv(0x84E0, &s.active);
@@ -313,4 +324,5 @@ extern "C" GLuint ravenfsr_bind_texture(GLuint tex)
     return tex;
 }
 
+extern "C" int ravenfsr_dispatched(void) { return dispatched; }   // debug: FSR ran this frame
 extern "C" void ravenfsr_frame_end(void) { dispatched = false; have_jit = false; have_mvp = have_nj = false; }

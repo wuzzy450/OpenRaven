@@ -1,11 +1,6 @@
 #!/bin/bash
 # Build ravengfx.so (graphics shim + F1 overlay + GL hooks + FSR 2). FSR 2 library: fsr2/build_fsr2.sh
 set -e; cd "$(dirname "$0")"; O=fsr2/obj; mkdir -p $O
-# Build fsr2/libfsr2gl.a if not built yet
-[ -f fsr2/libfsr2gl.a ] || ./fsr2/build_fsr2.sh
-# Build rio2pad.so (controller / cabinet I/O shim)
-gcc -O2 -Wall -shared -fPIC -o rio2pad.so rio2pad.c -lpthread -ldl
-echo built rio2pad.so
 # Vulkan neural network kernels -> vk/ravenvk_spv.h (needs glslc; the committed header is used otherwise)
 if command -v glslc >/dev/null; then (cd vk && for s in conv_cm.comp conv_plain.comp misc2.comp; do [ $s -nt ravenvk_spv.h ] && { ./build_vk.sh >/dev/null; break; }; done; true); fi
 for f in ravengfx ravenui ravengltrace ravenfg; do gcc -O2 -Wall -fPIC -c $f.c -o $O/$f.o; done
@@ -14,8 +9,3 @@ g++ -std=c++17 -O2 -fPIC -Wall -Wno-misleading-indentation -include fsr2/src/ffx
 g++ -shared -o ${OUT:-ravengfx.so} $O/ravengfx.o $O/ravenui.o $O/ravengltrace.o $O/ravenfg.o $O/ravenvk.o $O/ravenfsr.o fsr2/libfsr2gl.a \
     -static-libstdc++ -static-libgcc -ldl -lpthread -lm -Wl,--no-undefined
 echo built ravengfx.so
-# Build native Windows Vulkan worker (ravenvk_win.exe) if mingw-w64 is installed (for native VK_KHR_cooperative_matrix on Windows/WSL2)
-if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-    x86_64-w64-mingw32-gcc -O2 -Wall -o vk/ravenvk_win.exe vk/ravenvk_win_daemon.c vk/ravenvk.c -lws2_32
-    echo built vk/ravenvk_win.exe
-fi

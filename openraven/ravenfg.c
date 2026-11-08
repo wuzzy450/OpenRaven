@@ -27,7 +27,17 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#ifdef _WIN32
+// Windows (openraven/win, built into ravenloader.exe): GL from the loader, swaps on the game window.
+#include <windows.h>
+void *gl_resolve(const char *name); void raven_log(const char *fmt, ...); const char *raven_env(const char *name);
+void raven_fg_swap(void);   // shim_glx.c: SwapBuffers on the game window
+#define fprintf(f, ...) raven_log(__VA_ARGS__)
+#define getenv raven_env
+#define strncasecmp _strnicmp
+#else
 #include <dlfcn.h>
+#endif
 #include <stdarg.h>
 
 typedef unsigned GLenum, GLuint; typedef int GLint;
@@ -36,6 +46,12 @@ extern int ravengfx_win_w, ravengfx_win_h;
 void ravengfx_capture(const char *path);
 extern float ravengfx_fg_fps;            // displayed frames per second (real + generated)
 
+#ifdef _WIN32
+static void *gpa(const char *n) { return gl_resolve(n); }
+static void w_swap(void *d, unsigned long w) { (void)d; (void)w; raven_fg_swap(); }
+static void *w_dpy(void) { return (void *)1; }
+static unsigned long w_drw(void) { return 1; }
+#else
 static void *gpa(const char *n)
 {
     static void *(*g)(const char *);
@@ -43,6 +59,7 @@ static void *gpa(const char *n)
     void *f = g ? g(n) : NULL;
     return f ? f : dlsym(RTLD_DEFAULT, n);
 }
+#endif
 #define G(ret, name, args) static ret (*name) args;
 G(void, gGetIntegerv, (GLenum, GLint *)) G(void, gGetBooleanv, (GLenum, unsigned char *))
 G(unsigned char, gIsEnabled, (GLenum)) G(void, gEnable, (GLenum)) G(void, gDisable, (GLenum))
@@ -95,6 +112,13 @@ static void query_refresh(void)
 {
     const char *o = ravengfx_get("REFRESH_RATE"); if (getenv("RAVENFG_REFRESH")) o = getenv("RAVENFG_REFRESH");
     if (o && atof(o) > 20) { hw_period = 1.0 / atof(o); fprintf(stderr, "[ravenfg] refresh %.1f Hz (graphics.ini)\n", atof(o)); return; }
+#ifdef _WIN32
+    DEVMODEA dm = {0}; dm.dmSize = sizeof dm;
+    if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 20) {
+        hw_period = 1.0 / dm.dmDisplayFrequency;
+        fprintf(stderr, "[ravenfg] screen refresh %lu Hz\n", (unsigned long)dm.dmDisplayFrequency);
+    }
+#else
     void *x = dlopen("libXrandr.so.2", RTLD_NOW); if (!x || !xDpy) return;
     void *(*gsi)(void *, unsigned long) = dlsym(x, "XRRGetScreenInfo"); short (*rate)(void *) = dlsym(x, "XRRConfigCurrentRate");
     void (*fr)(void *) = dlsym(x, "XRRFreeScreenConfigInfo");
@@ -104,6 +128,7 @@ static void query_refresh(void)
     short r = rate(ci); if (fr) fr(ci);
     if (r > 20) hw_period = 1.0 / r;
     fprintf(stderr, "[ravenfg] screen refresh %d Hz\n", r);
+#endif
 }
 static void swap_done(void)
 {
@@ -112,7 +137,11 @@ static void swap_done(void)
     if (t - win_t0 > 1.0) { if (win_min < 0.1) period = win_min; if (hw_period > 0) period = hw_period; win_min = 1; win_t0 = t; }
 }
 
+#ifdef _WIN32
+static double now_s(void) { static LARGE_INTEGER f; LARGE_INTEGER c; if (!f.QuadPart) QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c); return (double)c.QuadPart / (double)f.QuadPart; }
+#else
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+#endif
 
 static const char *vs_src = "#version 330 core\nout vec2 uv;\n"
     "void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); uv = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
@@ -199,7 +228,11 @@ static int init_gl(void)
     L(gBindVertexArray, "glBindVertexArray") L(gDrawArrays, "glDrawArrays") L(gViewport, "glViewport")
     L(gColorMask, "glColorMask") L(gDepthMask, "glDepthMask") L(gReadBuffer, "glReadBuffer") L(gDrawBuffer, "glDrawBuffer")
     L(gGetFramebufferAttachmentParameteriv, "glGetFramebufferAttachmentParameteriv") L(gFlush, "glFlush")
+#ifdef _WIN32
+    xSwap = w_swap; xDpy = w_dpy; xDrw = w_drw;
+#else
     L(xSwap, "glXSwapBuffers") L(xDpy, "glXGetCurrentDisplay") L(xDrw, "glXGetCurrentDrawable")
+#endif
 #undef L
     GLuint v = shader(0x8B31, vs_src), f = shader(0x8B30, fs_src);
     prog = gCreateProgram(); gAttachShader(prog, v); gAttachShader(prog, f); gLinkProgram(prog);
@@ -442,10 +475,22 @@ static double slept;   // time spent in pace() this frame: not part of the game'
 static void pace(double target)
 {
     double t = now_s();
+#ifdef _WIN32
+    // Sleep() is ~1 ms at best (timeBeginPeriod(1)): sleep until ~1.5 ms before, then spin.
+    static int tp; if (!tp++) timeBeginPeriod(1);
+    if (target > t + 0.0005) { double r = target - t - 0.0015; if (r > 0.001) Sleep((DWORD)(r * 1000)); while (now_s() < target - 0.0002) YieldProcessor(); slept += now_s() - t; }
+    return;
+#endif
     if (target > t + 0.0005) { struct timespec ts = {0, (long)((target - t - 0.0003) * 1e9)}; nanosleep(&ts, NULL); slept += now_s() - t; }
 }
 
+#ifdef _WIN32
+// Neural pass not ported yet (step 5): off on Windows.
+static GLuint nn_in, nn_pin; static int nn_w, nn_h_;
+static void nn_apply(int w, int h) { (void)w; (void)h; static int said; if (!said++) fprintf(stderr, "[ravenfg] NEURAL not available on Windows yet, ignored\n"); }
+#else
 #include "ravennn.inc"
+#endif
 
 // RAVENFG_SHOT=1: capture generated frames next to the real-frame shots (one set per shot time)
 static int fg_shot_pending; static char fg_shot_base[480];

@@ -12,7 +12,7 @@
 // Torch row 0 = image top, so passes index in "torch" rows (flipped from GL).
 #include "neural/raven_nn_weights.h"
 #ifdef NN_UNET
-#include "ravennn_vk.inc"
+#include "ravennn_vk.inc"   // was ravennn5.inc (GL network, session 82-83)
 #else
 static int nn_ok = -1; static float nn_stable = 0.6f;
 #define NN_MAXG 8
