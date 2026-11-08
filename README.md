@@ -25,7 +25,7 @@ Original *Halo: Fireteam Raven* arcade cabinets run on custom x86_64 Linux hardw
   - **Adaptive Motion-Vector Frame Generation**: 2x / 3x / 4x optical-flow + depth-dilated motion vector frame generation (`interpolate` or `extrapolate` modes) with unwarped HUD separation.
   - **Any Resolution & Aspect Ratio (Hor+)**: Unlocks the cabinet's `2.0` aspect ratio lock and patches the 3D camera projection matrix for 16:9, 16:10, 4:3, 21:9, and 32:9 displays, plus adjustable Field of View (`FOV_SCALE`).
   - **Engine Quality Overrides**: 16x Anisotropic Filtering, 4096/8192 Shadow Maps, 4-cascade Stable Shadows, full-res Screen-Space Reflections, SSAO, VSync, and FPS cap.
-  - **HDR10 output (Windows)**: PQ / BT.2020 output with optional Pumbo AutoHDR highlight expansion, paper-white and peak-nits controls (approach from Community Shaders' HDR addon).
+  - **HDR10 output (Windows)**: PQ / BT.2020 output with AutoHDR highlight expansion up to your screen's peak brightness (approach from Community Shaders' HDR addon).
   - **Neural Detail Pass (Experimental / WIP)**: Vulkan cooperative-matrix / compute U-Net post-processing pass trained on remastered game tiles.
 
 ---
@@ -84,7 +84,7 @@ Up to 4 controllers are supported. Controller *N* controls Player *N*:
 
 Press **F1** while the game is running to open the OpenRaven configuration menu. You can navigate with **Arrow Keys + Tab + Enter/Esc** or with the **Mouse**.
 
-- **Display**: Resolution (`native`, `1080p`, `1440p`, `4K`, ultrawide), Render Scale, VSync, FPS Cap, Hor+ Aspect Fix, Field of View, FPS Counter, HDR (Windows: on/off, paper white, peak nits, AutoHDR, saturation; needs *Use HDR* on in Windows display settings).
+- **Display**: Resolution (`native`, `1080p`, `1440p`, `4K`, ultrawide), Render Scale, VSync, FPS Cap, Hor+ Aspect Fix, Field of View, FPS Counter, HDR (Windows: on/off + your screen's peak brightness; needs *Use HDR* on in Windows display settings).
 - **Upscaling & Frame Generation**:
   - **FSR 2.2**: `off` or `fsr2` (`native`, `quality`, `balanced`, `performance`, `ultra`) + live sharpness slider.
   - **Frame Generation**: `off`, `2x`, `3x`, `4x` (`interpolate` or `extrapolate`). Only adds frames the screen can show, so it never lowers the game's own FPS.

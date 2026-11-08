@@ -62,7 +62,7 @@ static const char *fs =
 "float avg(vec3 c){ return (c.r + c.g + c.b) / 3.0; }\n"
 // Pumbo AutoHDR (github.com/Filoppi/PumboAutoHDR), as in Community Shaders DisplayMapping.hlsli
 "vec3 pumbo(vec3 c){\n"
-"  float mw = max(min(peak / 80.0, 500.0 / paper), 1.0);\n"
+"  float mw = max(peak / paper, 1.0);\n"   // brightest SDR white -> the chosen peak (CS caps it at 500 nits)
 "  float r = avg(c); float tr = r + pow(clamp(r, 0.0, 1.0), 2.75) * (mw - 1.0);\n"
 "  float s1 = r > 0.0 ? tr / r : 1.0;\n"
 "  vec3 t3 = c + pow(clamp(c, 0.0, 1.0), vec3(2.75)) * (mw - 1.0);\n"
