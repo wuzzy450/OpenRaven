@@ -2,6 +2,10 @@
 
 **Community:** join the [Discord](https://discord.gg/nuvpXycag8) for help and updates · support the project on [Ko-fi](https://ko-fi.com/wuzzy450)
 
+**Watch it run:** [Mission 1 on PC with OpenRaven (native Windows, 60 FPS)](https://youtu.be/pZ166zhaEjs)
+
+[![Halo: Fireteam Raven Mission 1 on PC with OpenRaven](https://img.youtube.com/vi/pZ166zhaEjs/maxresdefault.jpg)](https://youtu.be/pZ166zhaEjs)
+
 **OpenRaven** is a free, open-source compatibility and enhancement layer for running the *Halo: Fireteam Raven* (v3.11) arcade game on standard Linux and Windows 10/11 PCs.
 
 Original *Halo: Fireteam Raven* arcade cabinets run on custom x86_64 Linux hardware with a Raw Thrills RIO2 USB I/O board, IRTrack optical guns, and a 5.1 surround amplifier. OpenRaven runs the game in a rootless sandbox (`bwrap`), translates standard gamepads into arcade cabinet switches and IR gun aim, fixes modern `glibc` crashes, downmixes 5.1 surround audio to stereo, and adds an in-game **F1 Settings Overlay** with **AMD FSR 2.2** temporal upscaling, **Adaptive Frame Generation** (2x/3x/4x), **Hor+ Ultrawide / Aspect Ratio fixes**, and an experimental **Vulkan Neural Detail Pass** (WIP).
