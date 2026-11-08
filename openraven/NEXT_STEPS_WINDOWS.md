@@ -183,6 +183,13 @@ attract mode at 58-60 FPS, graphics.ini values reach the engine.
 - Linux HDR: not possible on the X11/GLX path (no HDR signalling). Would need a Vulkan/Wayland present
   (gamescope). Not started.
 
+### Default settings for new players (user decision 2026-11-08)
+`github_staging/openraven/graphics.ini` = what new players get: max quality (aniso 16, shadows 8192 x 4 cascades,
+stable shadows, SSR 1.0, SSAO, lens flare), native resolution, RENDER_SCALE 1.0, VSync on, FSR 2 at native as AA
+(FSR_QUALITY native, FSR_SHARPNESS 0.3, ENABLE_TAA 1 because FSR 2 replaces the TAA pass), frame gen off, neural off,
+enhanced bloom off (engine bug), HDR off. The user's own `openraven/graphics.ini` is their personal tuning: never copy it
+into the repo, and never let scripted UI tests save into it.
+
 **Gotcha:** run the exe in a separate Bash command from `make`. With
 `/c/msys64/usr/bin` first in PATH, MSYS2's `timeout` drops exported env vars (all `RAVEN*`
 settings silently ignored).

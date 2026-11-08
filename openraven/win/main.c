@@ -157,7 +157,17 @@ static DWORD WINAPI game_thread(void *p) {
 // Log hardware exceptions (access violations etc.) with the faulting module.
 static LONG WINAPI crash_handler(EXCEPTION_POINTERS *ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
-    if (code < 0xC0000000) return EXCEPTION_CONTINUE_SEARCH;  // debug prints, C++ etc.
+    // Only real crashes. Everything else (C++ exceptions 0xE06D7363 that Windows DLLs and the GPU driver
+    // throw and catch themselves, e.g. when HDR starts Direct3D; debug prints; RPC errors) is left to its
+    // own handlers. Logging those as FATAL used to kill a healthy game.
+    switch (code) {
+    case EXCEPTION_ACCESS_VIOLATION: case EXCEPTION_ILLEGAL_INSTRUCTION: case EXCEPTION_PRIV_INSTRUCTION:
+    case EXCEPTION_STACK_OVERFLOW: case EXCEPTION_INT_DIVIDE_BY_ZERO: case EXCEPTION_IN_PAGE_ERROR:
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED: case 0xC0000409 /* STATUS_STACK_BUFFER_OVERRUN */:
+        break;
+    default:
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     CONTEXT *c = ep->ContextRecord;
     raven_log("FATAL: exception 0x%08lx at rip=%p (%s) addr=%p\n", code, (void *)c->Rip,
               elf_module_name((void *)c->Rip),
