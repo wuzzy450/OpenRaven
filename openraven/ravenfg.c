@@ -532,6 +532,15 @@ static void texstat(void)
         fprintf(stderr, "\n");
     }
 }
+// How many frames to show per real frame without slowing the game: with VSync each shown frame takes
+// a refresh slot, so N frames only fit when N * real FPS <= refresh (45 FPS at 60 Hz -> 1, not 2:
+// 2x would hold the game at 30). With VSync off presents don't wait, so the full factor is used.
+static int fg_fit(double hz, double rf)
+{
+    const char *v = ravengfx_get("VSYNC");
+    if (v && !strcmp(v, "0")) return n_gen;
+    return (int)floor(hz / rf + 0.05);
+}
 // Called from my_present instead of the game's present. Returns after the real present.
 void ravenfg_present(void (*real_present)(void *), void *ctx)
 {
@@ -569,19 +578,22 @@ void ravenfg_present(void (*real_present)(void *), void *ctx)
         int interp = !mode_extra;
         if (interp && !have_prev) { have_prev = 1; restore(&s); goto real; }   // need two frames first
         void *dpy = xDpy(); unsigned long drw = xDrw();
-        {   // count real frames per second; pick how many frames to show per real frame
-            static double ws; static int wn, probing; static double next_probe;
-            if (!ws) ws = t0; wn++;
-            if (t0 - ws >= 1.0) {
-                double rf = wn / (t0 - ws), hz = 1.0 / period; int nu = n_use;
-                if (force_all) nu = n_gen;
-                else if (probing) { probing = 0; nu = rf < 0.9 * hz ? (int)ceil(hz / rf - 0.1) : 1; }
-                else if (n_use == 1) { if (rf < 0.9 * hz) nu = (int)ceil(hz / rf - 0.1); }
-                else if (t0 > next_probe) { probing = 1; nu = 1; next_probe = t0 + 15; }
+        {   // pick how many frames to show per real frame from the game's own frame time (time from our
+            // present returning to the next present call: no VSync waits), so FG never holds the game back.
+            // A new factor must hold for 2 seconds in a row (a loading hitch does not switch it on).
+            static double ws, wsum; static int wn, want = 1, want_n;
+            if (!ws) ws = t0;
+            if (last_real_ret > 0 && t0 - last_real_ret < 0.5) { wsum += t0 - last_real_ret; wn++; }
+            if (t0 - ws >= 1.0 && wn > 0) {
+                double cf = wn / wsum, hz = 1.0 / period;   // FPS the game could reach on its own
+                int nu = force_all ? n_gen : cf < 0.9 * hz ? fg_fit(hz, cf) : 1;
                 if (nu > n_gen) nu = n_gen; if (nu < 1) nu = 1;
-                if (nu != n_use && !probing) fprintf(stderr, "[ravenfg] now %dx (real %.1f FPS, screen %.0f Hz)\n", nu, rf, hz);
-                if (n_use == 1 && nu > 1) next_probe = t0 + 15;
-                n_use = nu; ws = t0; wn = 0;
+                if (nu == want) want_n++; else { want = nu; want_n = 1; }
+                if (want != n_use && (want_n >= 2 || force_all)) {
+                    fprintf(stderr, "[ravenfg] now %dx (game could do %.1f FPS, screen %.0f Hz)\n", want, cf, hz);
+                    n_use = want;
+                }
+                ws = t0; wn = 0; wsum = 0;
             }
         }
         double step = real_dt / n_use;
