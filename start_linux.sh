@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpenRaven — Halo: Fireteam Raven (v3.11) Automatic Setup & Launcher for Linux (and WSL2)
+# OpenRaven — Halo: Fireteam Raven (v3.11) Automatic Setup & Launcher for Linux
 set -e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +24,7 @@ fi
 need_pkgs=()
 command -v bwrap >/dev/null 2>&1 || need_pkgs+=(bubblewrap)
 command -v unzip >/dev/null 2>&1 || need_pkgs+=(unzip)
+{ command -v 7z || command -v 7zz || command -v 7za || command -v bsdtar; } >/dev/null 2>&1 || need_pkgs+=(7zip)
 command -v gcc   >/dev/null 2>&1 || need_pkgs+=(gcc)
 command -v g++   >/dev/null 2>&1 || need_pkgs+=(g++)
 [ -f /usr/include/X11/Xlib.h ] || need_pkgs+=(libx11-dev)
@@ -37,160 +38,122 @@ if ! ldconfig -p 2>/dev/null | grep -q "liblapack\.so\.3" && \
   need_pkgs+=(liblapack3)
 fi
 
-IS_WSL=0
-if grep -qi microsoft /proc/version 2>/dev/null; then
-  IS_WSL=1
-  command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || need_pkgs+=(gcc-mingw-w64-x86-64)
-fi
-
 if [ "${#need_pkgs[@]}" -gt 0 ]; then
   echo "[OpenRaven] Installing missing dependencies (${need_pkgs[*]})..."
   if command -v apt-get >/dev/null 2>&1; then
-    APT_PKGS=(bubblewrap unzip build-essential libgl1 libgl1-mesa-dri mesa-vulkan-drivers libvulkan1 libx11-6 libx11-dev libxi6 libxrandr2 liblapack3 libudev1 pulseaudio-utils alsa-utils libasound2-plugins libvulkan-dev wmctrl)
-    [ "$IS_WSL" -eq 1 ] && APT_PKGS+=(gcc-mingw-w64-x86-64)
+    APT_PKGS=(bubblewrap unzip p7zip-full build-essential libgl1 libgl1-mesa-dri mesa-vulkan-drivers libvulkan1 libx11-6 libx11-dev libxi6 libxrandr2 liblapack3 libudev1 pulseaudio-utils alsa-utils libasound2-plugins libvulkan-dev wmctrl)
     $SUDO apt-get update && $SUDO apt-get install -y "${APT_PKGS[@]}"
   elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y bubblewrap unzip gcc gcc-c++ make libGL mesa-dri-drivers mesa-vulkan-drivers vulkan-loader libX11 libX11-devel libXi libXrandr lapack systemd-libs pulseaudio-utils alsa-utils vulkan-headers wmctrl
+    $SUDO dnf install -y bubblewrap unzip p7zip p7zip-plugins gcc gcc-c++ make libGL mesa-dri-drivers mesa-vulkan-drivers vulkan-loader libX11 libX11-devel libXi libXrandr lapack systemd-libs pulseaudio-utils alsa-utils vulkan-headers wmctrl
   elif command -v pacman >/dev/null 2>&1; then
-    $SUDO pacman -Sy --needed --noconfirm bubblewrap unzip base-devel libglvnd mesa vulkan-radeon vulkan-intel vulkan-icd-loader libx11 libxi libxrandr lapack systemd-libs libpulse alsa-utils alsa-plugins vulkan-headers
+    $SUDO pacman -Sy --needed --noconfirm bubblewrap unzip 7zip base-devel libglvnd mesa vulkan-radeon vulkan-intel vulkan-icd-loader libx11 libxi libxrandr lapack systemd-libs libpulse alsa-utils alsa-plugins vulkan-headers
   elif command -v zypper >/dev/null 2>&1; then
-    $SUDO zypper install -y bubblewrap unzip gcc gcc-c++ make libGL1 Mesa-dri Mesa-vulkan-device-select libvulkan1 libX11-6 libX11-devel libXi6 libXrandr2 liblapack3 systemd-libs pulseaudio-utils alsa-utils vulkan-headers wmctrl
+    $SUDO zypper install -y bubblewrap unzip p7zip gcc gcc-c++ make libGL1 Mesa-dri Mesa-vulkan-device-select libvulkan1 libX11-6 libX11-devel libXi6 libXrandr2 liblapack3 systemd-libs pulseaudio-utils alsa-utils vulkan-headers wmctrl
   else
     echo "Please install the following packages using your distro's package manager: ${need_pkgs[*]}"
     exit 1
   fi
 fi
 
-# 2. Check if the game files are already extracted in ./pm/g7/halo/
-if [ ! -f "$ROOT/pm/g7/halo/game" ] || [ ! -d "$ROOT/pm/g7/halo/data" ]; then
-  echo ""
-  echo "[OpenRaven] Game data not found in $ROOT/pm/g7/halo/."
+# 2. Game files. Needs (from any of the player's archives, any layout; recognised by SHA-256):
+#    ./pm/...                                  game data (folder containing pm/g7/halo/data)
+#    ./openraven/3.11-dec/pm/g7/halo/game      decrypted 3.11 game
+#    ./openraven/3.11-dec/pm/g7/halo/halo.so   its halo.so
+DEC="$ROOT/openraven/3.11-dec/pm/g7/halo"
+TMP="$ROOT/openraven/_setup_tmp"
+DEC_GAME=e88ba3543d5613c828d14aba26329a3b35b362d5dd7f817db7178c86a3b2fe98
+DEC_HALOSO=f000a002e74ba378af9363029259cb5d848fa1e0573ca854c83e4e12e13e551f
 
-  ZIP_PATH=""
-  ARG_PATH="${1:-}"
+sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+have_data() { [ -d "$ROOT/pm/g7/halo/data" ]; }
+have_dec() { [ "$(sha "$DEC/game")" = "$DEC_GAME" ] && [ "$(sha "$DEC/halo.so")" = "$DEC_HALOSO" ]; }
+ready() { have_data && have_dec; }
 
-  # Check if argument is a zip file or directory
-  if [ -n "$ARG_PATH" ]; then
-    if [ -f "$ARG_PATH" ]; then
-      ZIP_PATH="$ARG_PATH"
-    elif [ -d "$ARG_PATH" ]; then
-      TARGET_DIR=""
-      if [ -f "$ARG_PATH/g7/halo/game" ]; then
-        TARGET_DIR="$ARG_PATH"
-      elif [ -d "$ARG_PATH/pm" ] && [ -f "$ARG_PATH/pm/g7/halo/game" ]; then
-        TARGET_DIR="$ARG_PATH/pm"
-      fi
-      if [ -n "$TARGET_DIR" ]; then
-        echo "[OpenRaven] Linking existing 'pm' directory: $TARGET_DIR"
-        rmdir "$ROOT/pm" 2>/dev/null || true
-        ln -sfn "$(cd "$TARGET_DIR" && pwd)" "$ROOT/pm"
-      else
-        echo "[OpenRaven] Specified directory does not contain g7/halo/game: $ARG_PATH"
-      fi
-    fi
+SEVENZ=$(command -v 7z || command -v 7zz || command -v 7za || true)
+list_archive() {   # one path per line, / separators
+  if [ -n "$SEVENZ" ]; then "$SEVENZ" l -slt -ba "$1" | sed -n 's/^Path = //p'
+  elif command -v bsdtar >/dev/null; then bsdtar -tf "$1"
+  elif [[ "$1" == *.zip ]]; then unzip -Z1 "$1"
+  else echo "[OpenRaven] Need 7z or bsdtar to read $1" >&2; fi
+}
+extract() {   # archive dest [members...]
+  local a="$1" d="$2"; shift 2; mkdir -p "$d"
+  if [ -n "$SEVENZ" ]; then "$SEVENZ" x -y -bso0 -bsp1 "-o$d" "$a" "$@"
+  elif command -v bsdtar >/dev/null; then bsdtar -xf "$a" -C "$d" "$@"
+  else unzip -q -o "$a" "$@" -d "$d"; fi
+}
+
+use_archive() {
+  local a="$1"
+  echo "[OpenRaven] Checking $a"
+  local entries; entries=$(list_archive "$a")
+  local data; data=$(printf '%s\n' "$entries" | grep -m1 -E '(^|/)pm/g7/halo/data/' || true)
+  rm -rf "$TMP"
+  if [ -n "$data" ] && ! have_data; then
+    local prefix="${data%%pm/g7/halo/data/*}"
+    echo "[OpenRaven] Extracting game data (about 10 GB, takes a few minutes)..."
+    extract "$a" "$TMP"
+    if [ -d "$ROOT/pm" ]; then cp -a "$TMP/${prefix}pm/." "$ROOT/pm/"; else mv "$TMP/${prefix}pm" "$ROOT/pm"; fi
   fi
-
-  # Auto-check common locations first if not passed as argument
-  if [ -z "$ZIP_PATH" ] && [ ! -f "$ROOT/pm/g7/halo/game" ]; then
-    for cand in \
-      "$ROOT"/*[Rr]aven*.zip \
-      "$ROOT"/../*[Rr]aven*.zip \
-      "$HOME/Downloads"/*[Rr]aven*.zip \
-      "$ROOT/Halo Fireteam Raven (3.11)(2018)[Raw Thrills].zip" \
-      "$ROOT/../Halo Fireteam Raven (3.11)(2018)[Raw Thrills].zip" \
-      "$HOME/Downloads/Halo Fireteam Raven (3.11)(2018)[Raw Thrills].zip"; do
-      if [ -f "$cand" ]; then
-        echo "[OpenRaven] Found archive: $cand"
-        yn=""
-        if [ -t 0 ]; then
-          read -r -p "Use this file? [Y/n]: " yn || true
-        fi
-        if [[ -z "$yn" || "$yn" =~ ^[Yy] ]]; then
-          ZIP_PATH="$cand"
-          break
-        fi
-      fi
-    done
+  local cands; cands=$(printf '%s\n' "$entries" | grep -E '(^|/)(game|halo\.so)$' || true)
+  if [ -n "$cands" ] && ! have_dec; then
+    local base="$TMP"
+    if [ ! -d "$TMP" ]; then base="$TMP/cand"; mapfile -t m <<<"$cands"; extract "$a" "$base" "${m[@]}"; fi
+    mkdir -p "$DEC"
+    while IFS= read -r c; do
+      [ -f "$base/$c" ] || continue
+      case "$(sha "$base/$c")" in
+        "$DEC_GAME")   cp -f "$base/$c" "$DEC/game";    echo "[OpenRaven] Found the game program" ;;
+        "$DEC_HALOSO") cp -f "$base/$c" "$DEC/halo.so"; echo "[OpenRaven] Found halo.so" ;;
+      esac
+    done <<<"$cands"
   fi
+  rm -rf "$TMP"
+}
 
-  # Prompt the user (file picker if available, or terminal prompt / drag-and-drop)
-  while [ ! -f "$ROOT/pm/g7/halo/game" ] && { [ -z "$ZIP_PATH" ] || [ ! -f "$ZIP_PATH" ]; }; do
-    if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
-      if command -v zenity >/dev/null 2>&1 && [ -z "$NO_GUI_PICKER" ]; then
-        echo "[OpenRaven] Opening file picker... (or cancel to type path in terminal)"
-        ZIP_PATH=$(zenity --file-selection --title="Select Halo: Fireteam Raven game archive (.zip)" --file-filter="Zip archives (*.zip) | *.zip" 2>/dev/null || true)
-      elif command -v kdialog >/dev/null 2>&1 && [ -z "$NO_GUI_PICKER" ]; then
-        echo "[OpenRaven] Opening file picker... (or cancel to type path in terminal)"
-        ZIP_PATH=$(kdialog --getopenfilename "$HOME" "*.zip|Zip archives" --title "Select Halo: Fireteam Raven game archive (.zip)" 2>/dev/null || true)
-      fi
-      NO_GUI_PICKER=1
-    fi
+pick_archive() {   # prints chosen paths, one per line
+  if { [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; } && command -v zenity >/dev/null; then
+    zenity --file-selection --multiple --separator=$'\n' --title="Select your Halo: Fireteam Raven game archive" \
+      --file-filter="Archives | *.zip *.7z *.rar" 2>/dev/null || true
+  elif { [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; } && command -v kdialog >/dev/null; then
+    kdialog --multiple --separate-output --getopenfilename "$HOME" "*.zip *.7z *.rar|Archives" 2>/dev/null || true
+  elif [ -t 0 ]; then
+    read -r -p "Path to an archive (drag and drop, empty = stop): " p || true
+    p="${p%\'}"; p="${p#\'}"; p="${p%\"}"; p="${p#\"}"; p="${p%"${p##*[![:space:]]}"}"
+    [ -n "$p" ] && printf '%s\n' "$p"
+  fi
+}
 
-    if [ -z "$ZIP_PATH" ] || [ ! -f "$ZIP_PATH" ]; then
-      if [ ! -t 0 ]; then
-        echo "Error: game files not found and no interactive terminal to prompt for path." >&2
-        echo "Usage: $0 [/path/to/game.zip | /path/to/pm]" >&2
-        exit 1
-      fi
-      echo ""
-      echo "Please enter (or drag-and-drop) the full path to:"
-      echo "  Halo Fireteam Raven (3.11)(2018)[Raw Thrills].zip"
-      echo "  (Or provide the path to an already-extracted 'pm' folder)"
-      read -r -p "> " INPUT_PATH || true
-      # Strip surrounding single/double quotes and trailing whitespace from drag-and-drop
-      INPUT_PATH="${INPUT_PATH#"${INPUT_PATH%%[![:space:]]*}"}"
-      INPUT_PATH="${INPUT_PATH%"${INPUT_PATH##*[![:space:]]}"}"
-      INPUT_PATH="${INPUT_PATH#\'}"
-      INPUT_PATH="${INPUT_PATH%\'}"
-      INPUT_PATH="${INPUT_PATH#\"}"
-      INPUT_PATH="${INPUT_PATH%\"}"
-
-      if [ -d "$INPUT_PATH" ] && [ -f "$INPUT_PATH/g7/halo/game" ]; then
-        echo "[OpenRaven] Linking existing 'pm' directory: $INPUT_PATH"
-        rmdir "$ROOT/pm" 2>/dev/null || true
-        ln -sfn "$(cd "$INPUT_PATH" && pwd)" "$ROOT/pm"
-        break
-      elif [ -d "$INPUT_PATH/pm" ] && [ -f "$INPUT_PATH/pm/g7/halo/game" ]; then
-        echo "[OpenRaven] Linking existing 'pm' directory: $INPUT_PATH/pm"
-        rmdir "$ROOT/pm" 2>/dev/null || true
-        ln -sfn "$(cd "$INPUT_PATH/pm" && pwd)" "$ROOT/pm"
-        break
-      elif [ -f "$INPUT_PATH" ]; then
-        ZIP_PATH="$INPUT_PATH"
-      else
-        echo "File not found: $INPUT_PATH"
-        ZIP_PATH=""
-      fi
-    fi
+if ! ready; then
+  for a in "$@" "$ROOT"/* "$ROOT"/../* "$HOME/Downloads"/* "$HOME/Desktop"/*; do
+    [ -f "$a" ] || continue
+    case "${a,,}" in *.zip|*.7z|*.rar) ;; *) continue ;; esac
+    [[ "$(basename "${a,,}")" =~ raven|halo|3\.11 ]] || continue
+    ready && break
+    use_archive "$a"
   done
-
-  if [ -n "$ZIP_PATH" ] && [ ! -f "$ROOT/pm/g7/halo/game" ]; then
-    echo ""
-    echo "[OpenRaven] Extracting game files from:"
-    echo "  $ZIP_PATH"
-    echo "This is ~10.5 GB uncompressed and takes 1-3 minutes..."
-    unzip -q -o "$ZIP_PATH" -d "$ROOT"
-    if [ ! -f "$ROOT/pm/g7/halo/game" ]; then
-      echo "Error: Extraction finished, but $ROOT/pm/g7/halo/game was not found." >&2
-      exit 1
-    fi
-    echo "[OpenRaven] Extraction complete!"
-  fi
+  while ! ready; do
+    have_data || echo "[OpenRaven] Please pick your game archive."
+    have_dec  || echo "[OpenRaven] Your archive did not have the v3.11 game program files (game + halo.so). Please pick an archive that has them."
+    picked=$(pick_archive)
+    [ -n "$picked" ] || { echo "Setup not finished." >&2; exit 1; }
+    while IFS= read -r a; do [ -f "$a" ] && use_archive "$a"; done <<<"$picked"
+  done
+  echo "[OpenRaven] Game files ready."
 fi
 
 # 3. Verify and prepare game directory permissions & required folders
 mkdir -p "$ROOT/pm/g7/dump" "$ROOT/pm/g7/halo/pmuser/messages"
 chmod +x "$ROOT/pm/g7/halo/game" 2>/dev/null || true
-chmod 755 "$ROOT/pm/g7/halo/game" "$ROOT/pm/g7/halo/halo.so" "$ROOT/openraven/"*.sh 2>/dev/null || true
+chmod 755 "$ROOT/pm/g7/halo/game" "$ROOT/pm/g7/halo/halo.so" "$DEC/game" "$DEC/halo.so" "$ROOT/openraven/"*.sh 2>/dev/null || true
 
 # 4. Build OpenRaven shims if needed (or if source is newer)
 if [ ! -f "$ROOT/openraven/rio2pad.so" ] || [ ! -f "$ROOT/openraven/ravengfx.so" ]; then
   echo "[OpenRaven] Building shims (rio2pad.so, ravengfx.so)..."
   "$ROOT/openraven/build.sh"
 fi
-if grep -qi microsoft /proc/version 2>/dev/null && [ ! -f "$ROOT/openraven/vk/ravenvk_win.exe" ] && command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-  echo "[OpenRaven] Building native Windows Vulkan helper (ravenvk_win.exe)..."
-  x86_64-w64-mingw32-gcc -O2 -Wall -o "$ROOT/openraven/vk/ravenvk_win.exe" "$ROOT/openraven/vk/ravenvk_win_daemon.c" "$ROOT/openraven/vk/ravenvk.c" -lws2_32
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  echo "[OpenRaven] Note: on Windows, use start_windows.bat (native, much faster than WSL)."
 fi
 
 echo ""

@@ -107,6 +107,8 @@ float raven_fmod_volume_from_pct(const char *pct) {
     return p > 0 ? p / 75.0f : 4.0f;
 }
 void raven_fmod_set_volume(float boost) {
+    extern void raven_alsa_set_gain(float g);
+    raven_alsa_set_gain(boost);   // Linux FMOD path
     g_boost = boost;
     if (!g_master) return;
     R (*sv)(H, float) = (R (*)(H, float))fsym("FMOD_ChannelGroup_SetVolume");

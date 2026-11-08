@@ -6,17 +6,18 @@
 
 Original *Halo: Fireteam Raven* arcade cabinets run on custom x86_64 Linux hardware with a Raw Thrills RIO2 USB I/O board, IRTrack optical guns, and a 5.1 surround amplifier. OpenRaven runs the game in a rootless sandbox (`bwrap`), translates standard gamepads into arcade cabinet switches and IR gun aim, fixes modern `glibc` crashes, downmixes 5.1 surround audio to stereo, and adds an in-game **F1 Settings Overlay** with **AMD FSR 2.2** temporal upscaling, **Adaptive Frame Generation** (2x/3x/4x), **Hor+ Ultrawide / Aspect Ratio fixes**, and an experimental **Vulkan Neural Detail Pass** (WIP).
 
-> **Note:** No copyrighted game files or ROM dumps are included in this repository. You must provide your own copy of the game archive (e.g. `Halo Fireteam Raven (3.11)(2018)[Raw Thrills].zip` or extracted arcade game files).
+> **Note:** No copyrighted game files are included in this repository. You need your own copy of the game archive (e.g. `Halo Fireteam Raven (3.11)(2018)[Raw Thrills].zip`). The launcher finds it by itself (in the game folder, the folder above it, Downloads or Desktop) or asks you to pick it.
 
 ---
 
 ## Features
 
 - **Zero Cost & Rootless**: Entirely free and open-source. Uses `bubblewrap` (`bwrap`) to mount `/pm/g7/halo`, `/pm/g7/dump`, and `/eFileMaps` in a private user namespace—no root modifications to `/` required.
-- **Automatic Setup (Linux & Windows)**: One-command start scripts (`start_linux.sh` and `start_windows.bat`) ask for your game `.zip` archive, extract the game files, install missing dependencies, and launch the game.
+- **Automatic Setup (Linux & Windows)**: One-click start scripts (`start_linux.sh` and `start_windows.bat`) find your game archives (or ask for them), extract the files into place, install missing dependencies, and launch the game.
+- **Native Windows build**: `ravenloader.exe` runs the Linux game directly on Windows with your normal GPU driver. No WSL, no VM.
 - **Plug-and-Play Controller Support (`rio2pad.so`)**:
   - Hooks the cabinet's RIO2 switch polling (`sw_get`) and IRTrack gun getters directly in memory.
-  - Supports up to 4 Xbox-layout controllers (hot-plugging supported; on Windows, XInput controllers are bridged automatically into WSL2 without needing `usbipd`).
+  - Supports up to 4 Xbox-layout controllers (hot-plugging supported; XInput on Windows).
   - Enables Free Play by default, restores muted gameplay/cutscene audio (`gameVolume`), hides the *"Factory Setup Has Not Been Completed"* banner, and skips boot-time file checks & gun calibration straight to Attract Mode in ~12 seconds.
 - **In-Game Settings Overlay & Graphics Enhancements (`ravengfx.so`)**:
   - Press **F1** at any time (keyboard or mouse) to open the live settings menu (`graphics.ini`).
@@ -24,6 +25,7 @@ Original *Halo: Fireteam Raven* arcade cabinets run on custom x86_64 Linux hardw
   - **Adaptive Motion-Vector Frame Generation**: 2x / 3x / 4x optical-flow + depth-dilated motion vector frame generation (`interpolate` or `extrapolate` modes) with unwarped HUD separation.
   - **Any Resolution & Aspect Ratio (Hor+)**: Unlocks the cabinet's `2.0` aspect ratio lock and patches the 3D camera projection matrix for 16:9, 16:10, 4:3, 21:9, and 32:9 displays, plus adjustable Field of View (`FOV_SCALE`).
   - **Engine Quality Overrides**: 16x Anisotropic Filtering, 4096/8192 Shadow Maps, 4-cascade Stable Shadows, full-res Screen-Space Reflections, SSAO, VSync, and FPS cap.
+  - **HDR10 output (Windows)**: PQ / BT.2020 output with optional Pumbo AutoHDR highlight expansion, paper-white and peak-nits controls (approach from Community Shaders' HDR addon).
   - **Neural Detail Pass (Experimental / WIP)**: Vulkan cooperative-matrix / compute U-Net post-processing pass trained on remastered game tiles.
 
 ---
@@ -41,21 +43,23 @@ Original *Halo: Fireteam Raven* arcade cabinets run on custom x86_64 Linux hardw
    ```bash
    ./start_linux.sh
    ```
-3. When prompted, select or drag-and-drop your game `.zip` file into the terminal. It will extract the game into `./pm/`, install any missing packages (`bubblewrap`, `unzip`, etc.), and launch the game.
+3. On the first run it installs missing packages (`bubblewrap`, `7zip`, ...), finds your game archive (or opens a file picker / asks you to drag it in), extracts it and launches the game. You can also pass it directly: `./start_linux.sh game.zip`.
 
 To force-close the game at any time (arcade builds have no quit button):
 ```bash
 ./openraven/stop_halo.sh
 ```
 
-### Windows 10 / 11 (via WSL2 + WSLg)
+### Windows 10 / 11 (native)
 
-Because the arcade game is a native 64-bit Linux OpenGL 4.6 binary, Windows runs it at native speed through **WSL2 (Windows Subsystem for Linux)** with **WSLg** GPU acceleration.
+Requirements: Windows 10/11 64-bit, a GPU with an OpenGL 4.6 driver (NVIDIA, AMD, Intel).
 
-1. Clone or download this repository on Windows.
-2. Double-click **`start_windows.bat`**.
-3. If WSL2 is not installed yet, the script will install WSL2 + Ubuntu automatically.
-4. A file picker window will open asking for your game `.zip` archive. Pick your zip file—the script will extract the game, bridge your Windows Xbox/XInput controllers automatically, and launch the game window on your desktop.
+1. Download this repository (Code > Download ZIP) and unzip it anywhere with enough space (~11 GB).
+2. Double-click **`start_windows.bat`** (or drop your archives onto it).
+3. First run: it finds your game archive (or asks you to pick it) and extracts it (a few minutes).
+4. The game starts fullscreen. Later runs start straight away.
+
+Problems? Send `ravenloader.log` from the game folder.
 
 ---
 
@@ -80,10 +84,10 @@ Up to 4 controllers are supported. Controller *N* controls Player *N*:
 
 Press **F1** while the game is running to open the OpenRaven configuration menu. You can navigate with **Arrow Keys + Tab + Enter/Esc** or with the **Mouse**.
 
-- **Display**: Resolution (`native`, `1080p`, `1440p`, `4K`, ultrawide), Render Scale, VSync, FPS Cap, Hor+ Aspect Fix, Field of View, FPS Counter.
+- **Display**: Resolution (`native`, `1080p`, `1440p`, `4K`, ultrawide), Render Scale, VSync, FPS Cap, Hor+ Aspect Fix, Field of View, FPS Counter, HDR (Windows: on/off, paper white, peak nits, AutoHDR, saturation; needs *Use HDR* on in Windows display settings).
 - **Upscaling & Frame Generation**:
   - **FSR 2.2**: `off` or `fsr2` (`native`, `quality`, `balanced`, `performance`, `ultra`) + live sharpness slider.
-  - **Frame Generation**: `off`, `2x`, `3x`, `4x` (`interpolate` or `extrapolate`).
+  - **Frame Generation**: `off`, `2x`, `3x`, `4x` (`interpolate` or `extrapolate`). Only adds frames the screen can show, so it never lowers the game's own FPS.
   - **Neural Detail (WIP)**: Experimental Vulkan neural enhancement pass *(currently in active training/development)*.
 - **Quality**: Anisotropic Filtering (up to 16x), Shadow Map Resolution (up to 8192), Shadow Cascades (up to 4), Stable Shadows, SSAO, Reflections Resolution, Bloom/Glow sliders.
 - **Audio & Input**: Stream Volume Boost (`100%`–`400%`), Aim Mode (`cursor` vs `abs`), Stick Speed.
@@ -98,7 +102,8 @@ All settings are saved to [`openraven/graphics.ini`](openraven/graphics.ini).
 | Path | Description |
 |---|---|
 | `start_linux.sh` | One-click Linux installer & launcher (asks for game `.zip` on first run) |
-| `start_windows.bat` | One-click Windows launcher (sets up WSL2, bridges XInput pads, asks for game `.zip`) |
+| `start_windows.bat` | One-click Windows launcher (runs `openraven/setup_windows.ps1`: finds archives, sets up files, starts the game) |
+| `openraven/win/` | Native Windows loader `ravenloader.exe` (ELF loader + Windows shims, input, overlay, FSR 2, frame gen, HDR) |
 | `openraven/play_halo.sh` | Rootless `bwrap` sandbox launcher |
 | `openraven/stop_halo.sh` | Force-closes the running arcade process |
 | `openraven/build.sh` | Compiles `rio2pad.so`, `fsr2/libfsr2gl.a`, and `ravengfx.so` from source |
@@ -119,6 +124,8 @@ Prebuilt binaries (`rio2pad.so` and `ravengfx.so`) are included, and `start_linu
 cd openraven
 ./build.sh
 ```
+
+Windows (`ravenloader.exe` is prebuilt): install [MSYS2](https://www.msys2.org/) with the clang64 toolchain, then in a shell with `C:/msys64/clang64/bin` on PATH run `make` in `openraven/win`.
 
 ---
 

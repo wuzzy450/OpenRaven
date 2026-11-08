@@ -20,7 +20,9 @@ typedef struct { long long sec, nsec; } lx_timespec;
 M1(sin) M1(cos) M1(tan) M1(asin) M1(acos) M1(atan) M1(exp) M1(log) M1(log10)
 M1(sqrt) M1(floor) M1(ceil) M1(trunc) M1(rint)
 M1F(sinf) M1F(cosf) M1F(tanf) M1F(asinf) M1F(acosf) M1F(atanf) M1F(expf) M1F(logf)
-M1F(sqrtf) M1F(floorf) M1F(ceilf) M1F(roundf)
+M1F(sqrtf) M1F(floorf) M1F(ceilf) M1F(roundf) M1F(log10f)
+static SV double s_ldexp(double x, int n) { return ldexp(x, n); }
+static SV float s_ldexpf(float x, int n) { return ldexpf(x, n); }
 M2(atan2) M2(pow) M2(fmod) M2F(atan2f) M2F(powf) M2F(fmodf)
 static SV double s_modf(double x, double *i) { return modf(x, i); }
 static SV float s_modff(float x, float *i) { return modff(x, i); }
@@ -360,7 +362,7 @@ const shim_entry shims_libc2[] = {
     E(sin), E(cos), E(tan), E(asin), E(acos), E(atan), E(exp), E(log), E(log10),
     E(sqrt), E(floor), E(ceil), E(trunc), E(rint),
     E(sinf), E(cosf), E(tanf), E(asinf), E(acosf), E(atanf), E(expf), E(logf),
-    E(sqrtf), E(floorf), E(ceilf), E(roundf),
+    E(sqrtf), E(floorf), E(ceilf), E(roundf), E(log10f), E(ldexp), E(ldexpf),
     E(atan2), E(pow), E(fmod), E(atan2f), E(powf), E(fmodf),
     E(modf), E(modff), E(scalbn), E(sincos), E(sincosf),
     {"__fpclassify", s_fpclassify}, {"__isinf", s_isinf},

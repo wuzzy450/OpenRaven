@@ -39,6 +39,9 @@ static int relaunch_with_reservation(void) {
 // ---- shim lookup -------------------------------------------------------------
 
 static void *gcc_personality_stub;
+float raven_fmod_volume_from_pct(const char *pct);   // shim_fmod.c
+const char *ravengfx_get(const char *key);
+void raven_alsa_set_gain(float g);                   // shim_alsa.c
 static SV int fmod_ok(void) { return 0; }
 static SV int fmod_fail(void) {
     static int n;
@@ -50,7 +53,16 @@ void *shim_lookup(const char *name) {
     for (int t = 0; tabs[t]; t++)
         for (const shim_entry *e = tabs[t]; e->name; e++)
             if (e->fn && !strcmp(e->name, name)) return e->fn;
-    // Real FMOD (shim_fmod.c). An FMOD name it lacks, or RAVEN_NOAUDIO=1: return an error
+    for (const shim_entry *e = shims_alsa; e->name; e++)
+        if (!strcmp(e->name, name)) return e->fn;
+    // Linux FMOD loaded (default): FMOD names bind to its exports, except a few wrappers.
+    extern int raven_fmod_linux;
+    if (raven_fmod_linux) {
+        for (const shim_entry *e = shims_fmodlx; e->name; e++)
+            if (!strcmp(e->name, name)) return e->fn;
+        if (!strncmp(name, "FMOD_", 5) || strstr(name, "4FMOD")) return NULL;
+    }
+    // Windows FMOD DLLs (shim_fmod.c). An FMOD name it lacks, or RAVEN_NOAUDIO=1: return an error
     // (FMOD_RESULT != 0) so the game runs silent.
     if (!raven_env("RAVEN_NOAUDIO"))
         for (const shim_entry *e = shims_fmod; e->name; e++)
@@ -205,13 +217,32 @@ int main(int argc, char **argv) {
     // loaded after halo.so like the Linux search order.
     char cxx[MAX_PATH], gcc[MAX_PATH];
     const char *ec = getenv("RAVEN_LIBSTDCXX"), *eg2 = getenv("RAVEN_LIBGCC");
-    snprintf(cxx, sizeof cxx, "%s/pm/g7/halo/libstdc++.so.6", g_root);
+    // Shipped in the repo (the game archives don't contain it); GCC runtime library, redistributable.
+    snprintf(cxx, sizeof cxx, "%s/openraven/cabinet_libs/lib/x86_64-linux-gnu/libstdc++.so.6", g_root);
     snprintf(gcc, sizeof gcc, "%s/openraven/cabinet_libs/lib/x86_64-linux-gnu/libgcc_s.so.1", g_root);
     if (ec) snprintf(cxx, sizeof cxx, "%s", ec);
     if (eg2) snprintf(gcc, sizeof gcc, "%s", eg2);
     raven_log("libstdc++: %s\nlibgcc_s: %s\n", cxx, gcc);
     elf_module *cm = elf_load(cxx);
     elf_module *lm = elf_load(gcc);
+    // Sound: the game's own Linux FMOD 1.10 (shipped in openraven/extralibs like the Linux build),
+    // output through shim_alsa.c. RAVEN_FMOD=windows uses the Windows DLLs instead (shim_fmod.c).
+    elf_module *fm = NULL, *fs = NULL;
+    {
+        char a[MAX_PATH], b[MAX_PATH];
+        snprintf(a, sizeof a, "%s/openraven/extralibs/libfmod.so.10", g_root);
+        snprintf(b, sizeof b, "%s/openraven/extralibs/libfmodstudio.so.10", g_root);
+        const char *mode = raven_env("RAVEN_FMOD");
+        if (!raven_env("RAVEN_NOAUDIO") && !(mode && !strcmp(mode, "windows")) &&
+            GetFileAttributesA(a) != INVALID_FILE_ATTRIBUTES && GetFileAttributesA(b) != INVALID_FILE_ATTRIBUTES) {
+            fm = elf_load(a); fs = elf_load(b);
+            extern int raven_fmod_linux;
+            raven_fmod_linux = fm && fs;
+            raven_log("FMOD: %s\n", raven_fmod_linux ? "game's Linux FMOD (extralibs) -> WASAPI" : "Linux FMOD failed to load");
+            const char *v = raven_env("RAVEN_VOLUME");
+            raven_alsa_set_gain(v ? (float)atof(v) : raven_fmod_volume_from_pct(ravengfx_get("volume") ? ravengfx_get("volume") : "0"));
+        }
+    }
 
     FILE *rep = fopen("missing_imports.tsv", "w");
     fprintf(rep, "module\tlibrary\tsymbol\n");
@@ -253,6 +284,8 @@ int main(int argc, char **argv) {
 
     run_inits(lm);
     run_inits(cm);
+    if (fm) { patch_canary(fm); run_inits(fm); }
+    if (fs) { patch_canary(fs); run_inits(fs); }
     run_inits(hm);
 
     // _start does: mov $fini,%r8; mov $init,%rcx; mov $main,%rdi; call __libc_start_main

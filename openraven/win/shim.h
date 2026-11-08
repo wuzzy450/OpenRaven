@@ -11,6 +11,7 @@ typedef struct { const char *name; void *fn; } shim_entry;
 
 // Each shim_*.c file exports one table, terminated by {NULL, NULL}.
 extern const shim_entry shims_core[], shims_fmt[], shims_thread[], shims_dl[], shims_libc2[], shims_locale[], shims_x11[], shims_glx[], shims_gl[], shims_devices[], shims_ctx[], shims_fmod[], shims_glhook[];
+extern const shim_entry shims_fmodlx[], shims_alsa[];   // shim_fmodlx.c (Linux FMOD wrappers), shim_alsa.c (fake libasound -> WASAPI)
 
 void *shim_lookup(const char *name);
 void *shim_missing_stub(const char *name);  // thunk that logs + aborts when called

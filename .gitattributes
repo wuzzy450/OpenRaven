@@ -1,0 +1,7 @@
+*.sh text eol=lf
+*.ini text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.so binary
+*.so.* binary
+*.exe binary

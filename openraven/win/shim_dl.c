@@ -9,6 +9,8 @@
 typedef struct { char name[256]; } lx_lib;
 
 static SV void *s_dlopen(const char *name, int flags) {
+    // No PulseAudio: FMOD then uses its ALSA output (shim_alsa.c).
+    if (name && strstr(name, "libpulse")) { raven_log("dlopen(%s) -> not available\n", name); return NULL; }
     lx_lib *l = calloc(1, sizeof *l);
     snprintf(l->name, sizeof l->name, "%s", name ? name : "<self>");
     raven_log("dlopen(%s, 0x%x) -> %p\n", l->name, flags, (void *)l);

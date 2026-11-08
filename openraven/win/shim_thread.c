@@ -227,7 +227,7 @@ const shim_entry shims_thread[] = {
     {"pthread_once", s_once}, {"pthread_detach", s_detach}, {"pthread_exit", s_exit},
     {"pthread_timedjoin_np", s_timedjoin}, {"pthread_kill", s_ok},
     {"pthread_setcanceltype", s_ok}, {"pthread_attr_setinheritsched", s_ok},
-    {"pthread_attr_setschedparam", s_ok}, {"pthread_attr_setschedpolicy", s_ok},
+    {"pthread_attr_setschedparam", s_ok}, {"pthread_setschedparam", s_ok}, {"pthread_attr_setschedpolicy", s_ok},
     {"pthread_attr_setstack", s_ok},
     {"sem_destroy", s_sem_destroy}, {"sem_trywait", s_sem_trywait},
     {"sem_timedwait", s_sem_timedwait}, {"sem_getvalue", s_sem_getvalue},
