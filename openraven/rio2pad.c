@@ -152,7 +152,7 @@ static int in_continue(int p)
 static int trigger_pressed(int p)
 {
     static int block[MAX_PADS];
-    int down = g_pads[p].fd != -1 && g_pads[p].axis[5] > 0;
+    int down = g_pads[p].fd != -1 && (g_pads[p].axis[5] > 0 || (g_pads[p].fd == -2 && g_pads[p].axis[5] > -16000 && g_pads[p].axis[5] != 0));
     if (getenv("RIO2PAD_CONTINUESHOOT")) return down;
     if (in_continue(p)) { block[p] = 1; return 0; }
     if (block[p] && down) return 0;   // still held from the countdown
@@ -197,7 +197,7 @@ static void *sw_get_hook(int id)
         pressed = 0;
         if (k == 2) pressed = trigger_pressed(p);                                       // RT
         if (k == 3) pressed = btn(p, PAD_RB);                                           // RB = reload
-        if (k == 4) pressed = g_pads[p].fd != -1 && g_pads[p].axis[2] > 0;               // LT = grenade
+        if (k == 4) pressed = g_pads[p].fd != -1 && (g_pads[p].axis[2] > 0 || (g_pads[p].fd == -2 && g_pads[p].axis[2] > -16000 && g_pads[p].axis[2] != 0)); // LT = grenade
     }
     // Player START in the gun cabinet: the type-8 remap sends 581 -> logical 0x24e and 582 -> 0x251,
     // and the game reads "Player N Start" as logical 0x24e + slot (gun 2 is slot 3). Same switch
@@ -335,7 +335,11 @@ static int adj_get_hook(const char *sec, const char *key)
         int r = v;
         if (!strcmp(key, "gameVolume")) {
             if (getenv("RIO2PAD_GAMEVOL")) r = atoi(getenv("RIO2PAD_GAMEVOL"));
-            else if (v == 0) r = 100;
+            else r = 100;
+        }
+        if (!strcmp(key, "attractVolume")) {
+            if (getenv("RIO2PAD_ATTRACTVOL")) r = atoi(getenv("RIO2PAD_ATTRACTVOL"));
+            else r = 100;
         }
         for (int i = 0; i < 8; i++) {
             if (!strcmp(seen[i], key)) break;

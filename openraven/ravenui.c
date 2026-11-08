@@ -73,7 +73,7 @@ static item_t items[] = {
  {"Effects","Bloom strength","bloomscale",T_NUM,1,NULL,0,3,0.1f,"1","Live"},
  {"Effects","Glow strength","glowscale",T_NUM,1,NULL,0,3,0.1f,"1","Live"},
  {"Effects","Lens flare","ENABLE_LENS_FLARE",T_CHOICE,0,"0|1",0,0,0,"0",NULL},
- {"Audio","Volume boost","volume",T_CHOICE,1,"100%|150%|200%|250%|300%|350%|400%",0,0,0,"300%","PipeWire stream volume"},
+ {"Audio","Volume boost","volume",T_CHOICE,1,"100%|125%|150%|200%|250%|300%",0,0,0,"100%","Audio stream volume"},
  {"Input","Aim mode","aim",T_CHOICE,1,"cursor|abs",0,0,0,"cursor","cursor: stick moves aim. abs: stick = aim"},
  {"Input","Stick speed","stick_speed",T_NUM,1,NULL,0.1f,4,0.05f,"0.25","Screen widths per second (cursor mode)"},
  {"Overlay","Overlay size","ui_scale",T_CHOICE,1,"0.75|0.9|1.0|1.1|1.25|1.5|2.0",0,0,0,"1.0","Size of this menu. It always shrinks to fit the screen"},
@@ -174,7 +174,7 @@ static void set_volume(const char *pct)
 {
     char cmd[512];
     snprintf(cmd, sizeof cmd, "id=$(pactl list sink-inputs 2>/dev/null | awk '/^Sink Input #/{id=substr($3,2)} "
-             "/PipeWire ALSA \\[game\\]/{print id; exit}'); [ -n \"$id\" ] && pactl set-sink-input-volume \"$id\" %s "
+             "/PipeWire ALSA \\[game\\]|ALSA plug-in \\[game\\]|application.process.binary = \"game\"/{print id; exit}'); [ -n \"$id\" ] && pactl set-sink-input-volume \"$id\" %s "
              ">/dev/null 2>&1 &", pct);
     if (system(cmd)) {}
 }

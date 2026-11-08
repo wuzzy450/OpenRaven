@@ -1,4 +1,4 @@
-// ravengfx.so - graphics settings shim for Halo: Fireteam Raven (3.11-dec build).
+// ravengfx.so - graphics settings shim for Halo: Fireteam Raven (v3.11).
 // Preloaded next to rio2pad.so. Kept separate so input and graphics work don't collide.
 //
 // The engine reads its render options (MSAA, SMAA, FXAA, ANISOTROPY_LEVEL, shadows, ...) from the
@@ -343,28 +343,128 @@ static void hook_tanf(void)
     for (uint64_t *q = (uint64_t *)0x1690000UL; q < (uint64_t *)0x1692800UL; q++)
         if (*q == (uint64_t)real_tanf) { *q = (uint64_t)log_tanf; fprintf(stderr, "[ravengfx] tanf slot %p\n", (void *)q); }
 }
+
+static void try_set_fullscreen(void *cd_ptr, unsigned long cdr_win)
+{
+    static int attempts = 0;
+    if (attempts >= 5 || !cd_ptr || !cdr_win) return;
+    const char *fs = getenv("HALO_FULLSCREEN");
+    if (!fs) fs = lookup("fullscreen");
+    if (fs && (!strcmp(fs, "0") || !strcasecmp(fs, "off") || !strcasecmp(fs, "false"))) {
+        attempts = 999;
+        return;
+    }
+
+    static void *x11 = NULL;
+    if (!x11) x11 = dlopen("libX11.so.6", RTLD_LAZY);
+    if (!x11) return;
+
+    typedef unsigned long (*pfn_XInternAtom)(void *, const char *, int);
+    typedef unsigned long (*pfn_XDefaultRootWindow)(void *);
+    typedef int (*pfn_XSendEvent)(void *, unsigned long, int, long, void *);
+    typedef int (*pfn_XFlush)(void *);
+    typedef int (*pfn_XDefaultScreen)(void *);
+    typedef int (*pfn_XDisplayWidth)(void *, int);
+    typedef int (*pfn_XDisplayHeight)(void *, int);
+    typedef int (*pfn_XMoveResizeWindow)(void *, unsigned long, int, int, unsigned int, unsigned int);
+    typedef int (*pfn_XChangeProperty)(void *, unsigned long, unsigned long, unsigned long, int, int, const unsigned char *, int);
+
+    pfn_XInternAtom pXInternAtom = (pfn_XInternAtom)dlsym(x11, "XInternAtom");
+    pfn_XDefaultRootWindow pXDefaultRootWindow = (pfn_XDefaultRootWindow)dlsym(x11, "XDefaultRootWindow");
+    pfn_XSendEvent pXSendEvent = (pfn_XSendEvent)dlsym(x11, "XSendEvent");
+    pfn_XFlush pXFlush = (pfn_XFlush)dlsym(x11, "XFlush");
+    pfn_XDefaultScreen pXDefaultScreen = (pfn_XDefaultScreen)dlsym(x11, "XDefaultScreen");
+    pfn_XDisplayWidth pXDisplayWidth = (pfn_XDisplayWidth)dlsym(x11, "XDisplayWidth");
+    pfn_XDisplayHeight pXDisplayHeight = (pfn_XDisplayHeight)dlsym(x11, "XDisplayHeight");
+    pfn_XMoveResizeWindow pXMoveResizeWindow = (pfn_XMoveResizeWindow)dlsym(x11, "XMoveResizeWindow");
+    pfn_XChangeProperty pXChangeProperty = (pfn_XChangeProperty)dlsym(x11, "XChangeProperty");
+
+    if (!pXInternAtom || !pXFlush) return;
+
+    const char *is_wsl_env = getenv("IS_WSL");
+    int is_wsl = (is_wsl_env && atoi(is_wsl_env) != 0) || access("/mnt/wslg", F_OK) == 0;
+
+    if (is_wsl) {
+        // Under WSLg (Weston FreeRDP RAIL backend), _NET_WM_STATE_FULLSCREEN causes Weston
+        // to unmap or hide the window from the Windows desktop. To achieve borderless fullscreen
+        // without dropping out of RAIL, strip decorations via _MOTIF_WM_HINTS and resize to screen.
+        if (pXChangeProperty) {
+            unsigned long motif_hints = pXInternAtom(cd_ptr, "_MOTIF_WM_HINTS", 0);
+            if (motif_hints) {
+                // flags = MWM_HINTS_DECORATIONS (2), decorations = 0 (none)
+                unsigned long hints[5] = { 2, 0, 0, 0, 0 };
+                pXChangeProperty(cd_ptr, cdr_win, motif_hints, motif_hints, 32, 0 /* PropModeReplace */, (const unsigned char *)hints, 5);
+            }
+        }
+        if (pXMoveResizeWindow && pXDefaultScreen && pXDisplayWidth && pXDisplayHeight) {
+            int scr = pXDefaultScreen(cd_ptr);
+            int sw = pXDisplayWidth(cd_ptr, scr);
+            int sh = pXDisplayHeight(cd_ptr, scr);
+            if (sw <= 640 && ravengfx_win_w > sw) sw = ravengfx_win_w;
+            if (sh <= 480 && ravengfx_win_h > sh) sh = ravengfx_win_h;
+            pXMoveResizeWindow(cd_ptr, cdr_win, 0, 0, (unsigned int)sw, (unsigned int)sh);
+        }
+        pXFlush(cd_ptr);
+        attempts++;
+        if (attempts == 1) {
+            fprintf(stderr, "[ravengfx] applied borderless window for WSLg on window 0x%lx\n", cdr_win);
+        }
+    } else {
+        // Native Linux: standard EWMH _NET_WM_STATE_FULLSCREEN
+        if (!pXDefaultRootWindow || !pXSendEvent) return;
+        unsigned long wm_state = pXInternAtom(cd_ptr, "_NET_WM_STATE", 0);
+        unsigned long wm_fullscreen = pXInternAtom(cd_ptr, "_NET_WM_STATE_FULLSCREEN", 0);
+        if (!wm_state || !wm_fullscreen) return;
+
+        struct {
+            int type;
+            unsigned long serial;
+            int send_event;
+            void *display;
+            unsigned long window;
+            unsigned long message_type;
+            int format;
+            long data[5];
+        } xev;
+        memset(&xev, 0, sizeof(xev));
+        xev.type = 33; // ClientMessage
+        xev.window = cdr_win;
+        xev.message_type = wm_state;
+        xev.format = 32;
+        xev.data[0] = 1; // _NET_WM_STATE_ADD
+        xev.data[1] = (long)wm_fullscreen;
+        xev.data[2] = 0;
+        xev.data[3] = 1; // normal application
+
+        unsigned long root = pXDefaultRootWindow(cd_ptr);
+        long mask = (1L << 17) | (1L << 19); // SubstructureNotifyMask | SubstructureRedirectMask
+        pXSendEvent(cd_ptr, root, 0, mask, &xev);
+        pXFlush(cd_ptr);
+        attempts++;
+        if (attempts == 1) {
+            fprintf(stderr, "[ravengfx] requested X11 fullscreen on window 0x%lx\n", cdr_win);
+        }
+    }
+}
+
 static void my_present(void *ctx)
 {
     my_swap(NULL, 0);                       // overlay + capture + FPS, before the real swap
+    void *(*cd)(void) = glsym("glXGetCurrentDisplay"); unsigned long (*cdr)(void) = glsym("glXGetCurrentDrawable");
+    if (cd && cdr) {
+        void *d = cd(); unsigned long w = cdr();
+        if (d && w) try_set_fullscreen(d, w);
+    }
     static double in_sum, out_sum, tprev; static long n;
     static int si_cur = -2, si_n;          // VSYNC / SWAP_INTERVAL (live from the overlay) / RAVENGFX_SWAPINTERVAL
     if (si_n++ % 30 == 0) {                // 0 = off, 1 = on, -1 = adaptive (tear only when late)
         const char *si = getenv("RAVENGFX_SWAPINTERVAL"); if (!si) si = lookup("VSYNC"); if (!si) si = lookup("SWAP_INTERVAL");
         int want = si ? (!strcmp(si, "adaptive") ? -1 : atoi(si)) : -2;
-        void *(*cd)(void) = glsym("glXGetCurrentDisplay"); unsigned long (*cdr)(void) = glsym("glXGetCurrentDrawable");
-        // The game sets its own swap interval (SGI/MESA), which can undo ours: read it back each time.
-        int (*qd)(void *, unsigned long, int, unsigned *) = glsym("glXQueryDrawable");
-        unsigned now_si = 0; int drift = 0;
-        if (want != -2 && si_cur != -2 && qd && cd && cdr && cd()) {
-            qd(cd(), cdr(), 0x20F1 /* GLX_SWAP_INTERVAL_EXT */, &now_si);
-            drift = want >= 0 ? (int)now_si != want : 0;
-            if (drift) fprintf(stderr, "[ravengfx] swap interval was changed to %u, setting it back\n", now_si);
-        }
-        if (want != -2 && (want != si_cur || drift)) {
+        if (want != -2 && want != si_cur) {
             si_cur = want;
             void (*ext)(void *, unsigned long, int) = glsym("glXSwapIntervalEXT");
             int (*mesa)(unsigned) = glsym("glXSwapIntervalMESA");
-            if (ext && cd && cdr) ext(cd(), cdr(), want); else if (mesa) mesa(want < 0 ? 1 : want);
+            if (ext && cd && cdr && cd() && cdr()) ext(cd(), cdr(), want); else if (mesa) mesa(want < 0 ? 1 : want);
             fprintf(stderr, "[ravengfx] swap interval %d (%s)\n", want, ext ? "EXT" : mesa ? "MESA" : "none");
         }
     }

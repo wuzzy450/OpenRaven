@@ -1,7 +1,13 @@
+# Keep Linux scripts and sources LF, Windows scripts CRLF, binaries untouched
+* text=auto
 *.sh text eol=lf
+*.bash text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.cpp text eol=lf
 *.ini text eol=lf
-*.bat text eol=crlf
 *.ps1 text eol=crlf
+*.bat text eol=crlf
 *.so binary
 *.so.* binary
 *.exe binary

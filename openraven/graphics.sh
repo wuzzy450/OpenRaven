@@ -16,7 +16,7 @@ for v in RAVENGFX_SHOT RAVENGFX_SHOTDIR RAVENGFX_FPSLOG RAVENGFX_OVERLAY RAVENGF
   [ -n "${!v}" ] && GFX_BWRAP+=(--setenv "$v" "${!v}")
 done
 # Launcher/cabinet/input options (env vars win over graphics.ini).
-export HALO_VOLUME="${HALO_VOLUME:-$(gfx volume 300%)}"
+export HALO_VOLUME="${HALO_VOLUME:-$(gfx volume 100%)}"
 [ -z "$RIO2PAD_AIM" ] && [ "$(gfx aim cursor)" = abs ] && export RIO2PAD_AIM=abs
 [ -z "$RIO2PAD_STICKSPEED" ] && export RIO2PAD_STICKSPEED="$(gfx stick_speed 0.25)"
 [ -z "$RIO2PAD_FREEPLAY" ] && [ "$(gfx free_play 1)" = 0 ] && export RIO2PAD_FREEPLAY=0

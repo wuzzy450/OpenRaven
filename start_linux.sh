@@ -41,14 +41,14 @@ fi
 if [ "${#need_pkgs[@]}" -gt 0 ]; then
   echo "[OpenRaven] Installing missing dependencies (${need_pkgs[*]})..."
   if command -v apt-get >/dev/null 2>&1; then
-    APT_PKGS=(bubblewrap unzip p7zip-full build-essential libgl1 libgl1-mesa-dri mesa-vulkan-drivers libvulkan1 libx11-6 libx11-dev libxi6 libxrandr2 liblapack3 libudev1 pulseaudio-utils alsa-utils libasound2-plugins libvulkan-dev wmctrl)
+    APT_PKGS=(bubblewrap unzip p7zip-full build-essential libgl1 libgl1-mesa-dri mesa-vulkan-drivers libvulkan1 libx11-6 libx11-dev libxi6 libxrandr2 liblapack3 libudev1 pulseaudio-utils alsa-utils libasound2-plugins swh-plugins ladspa-sdk libvulkan-dev wmctrl)
     $SUDO apt-get update && $SUDO apt-get install -y "${APT_PKGS[@]}"
   elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y bubblewrap unzip p7zip p7zip-plugins gcc gcc-c++ make libGL mesa-dri-drivers mesa-vulkan-drivers vulkan-loader libX11 libX11-devel libXi libXrandr lapack systemd-libs pulseaudio-utils alsa-utils vulkan-headers wmctrl
+    $SUDO dnf install -y bubblewrap unzip p7zip p7zip-plugins gcc gcc-c++ make libGL mesa-dri-drivers mesa-vulkan-drivers vulkan-loader libX11 libX11-devel libXi libXrandr lapack systemd-libs pulseaudio-utils alsa-utils ladspa-swh-plugins vulkan-headers wmctrl
   elif command -v pacman >/dev/null 2>&1; then
-    $SUDO pacman -Sy --needed --noconfirm bubblewrap unzip 7zip base-devel libglvnd mesa vulkan-radeon vulkan-intel vulkan-icd-loader libx11 libxi libxrandr lapack systemd-libs libpulse alsa-utils alsa-plugins vulkan-headers
+    $SUDO pacman -Sy --needed --noconfirm bubblewrap unzip 7zip base-devel libglvnd mesa vulkan-radeon vulkan-intel vulkan-icd-loader libx11 libxi libxrandr lapack systemd-libs libpulse alsa-utils alsa-plugins swh-plugins vulkan-headers
   elif command -v zypper >/dev/null 2>&1; then
-    $SUDO zypper install -y bubblewrap unzip p7zip gcc gcc-c++ make libGL1 Mesa-dri Mesa-vulkan-device-select libvulkan1 libX11-6 libX11-devel libXi6 libXrandr2 liblapack3 systemd-libs pulseaudio-utils alsa-utils vulkan-headers wmctrl
+    $SUDO zypper install -y bubblewrap unzip p7zip gcc gcc-c++ make libGL1 Mesa-dri Mesa-vulkan-device-select libvulkan1 libX11-6 libX11-devel libXi6 libXrandr2 liblapack3 systemd-libs pulseaudio-utils alsa-utils ladspa-swh-plugins vulkan-headers wmctrl
   else
     echo "Please install the following packages using your distro's package manager: ${need_pkgs[*]}"
     exit 1
@@ -148,7 +148,9 @@ chmod +x "$ROOT/pm/g7/halo/game" 2>/dev/null || true
 chmod 755 "$ROOT/pm/g7/halo/game" "$ROOT/pm/g7/halo/halo.so" "$DEC/game" "$DEC/halo.so" "$ROOT/openraven/"*.sh 2>/dev/null || true
 
 # 4. Build OpenRaven shims if needed (or if source is newer)
-if [ ! -f "$ROOT/openraven/rio2pad.so" ] || [ ! -f "$ROOT/openraven/ravengfx.so" ]; then
+if [ ! -f "$ROOT/openraven/rio2pad.so" ] || [ ! -f "$ROOT/openraven/ravengfx.so" ] || \
+   [ "$ROOT/openraven/ravengfx.c" -nt "$ROOT/openraven/ravengfx.so" ] || \
+   [ "$ROOT/openraven/rio2pad.c" -nt "$ROOT/openraven/rio2pad.so" ]; then
   echo "[OpenRaven] Building shims (rio2pad.so, ravengfx.so)..."
   "$ROOT/openraven/build.sh"
 fi
