@@ -333,6 +333,8 @@ void ravengfx_frame(void) {
         bf(0x8CA8, (unsigned)rfb);
     }
     extern void ravengfx_overlay_draw(int sw, int sh);  // ravenui_win.c (F1 overlay, FPS counter)
+    extern void ravenrec_frame(int sw, int sh);  // ravenrec_win.c: game-only frames for the recorder
+    ravenrec_frame(ravengfx_win_w, ravengfx_win_h);
     ravengfx_overlay_draw(ravengfx_win_w, ravengfx_win_h);
     extern void ravengl_frame_end(void);
     ravengl_frame_end();  // FSR 2: new frame (dispatch again, fresh jitter)
