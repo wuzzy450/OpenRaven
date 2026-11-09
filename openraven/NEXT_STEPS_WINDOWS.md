@@ -246,8 +246,8 @@ Each step: build, run, check `ravenloader.log`, update this file. Never save scr
 the user's `openraven/graphics.ini` (see "Default settings for new players").
 
 1. **Neural rendering on Windows: Vulkan, in-process, FP16 accumulation (user's top priority).**
-   Ship only the v8 network (SeedVR2 teacher): `neural/raven_nn_weights.h` (= `raven_nn8_weights.h`,
-   sha256 3bafb32c...). No other weights in the repo.
+   Ship only the v9 network (SeedVR2 teacher, flat-area fix): `neural/raven_nn_weights.h` (= `raven_nn9_weights.h`,
+   sha256 3288eed6...). No other weights in the repo.
    What exists: `ravennn.inc` -> `ravennn_vk.inc` (GL final pass + Vulkan network) and `vk/ravenvk.c`
    (device setup, `rvk_init`, cooperative-matrix detection: level 2 = fp16 accumulate works, 1 = fp32
    only, 0 = none) with prebuilt SPIR-V in `vk/ravenvk_spv.h` (`conv_cm.comp` built with -DACC16=1 and
