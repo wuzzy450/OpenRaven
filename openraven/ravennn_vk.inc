@@ -106,6 +106,14 @@ static void nn_vk_free(void)
     free(nn_host_buf); nn_host_buf = NULL;
     rvk_destroy(); nn_vk_ok = 0;
 }
+static const char *nn_acc_desc(const rvk_info *in)   // e.g. " fp16 accumulate (21/21 layers)"
+{
+    static char b[64];
+    if (!in->coopmat) return "";
+    if (in->n_acc32 == 0 || in->n_acc16 == 0) snprintf(b, sizeof b, " %s accumulate (%d/%d layers)", in->n_acc16 ? "fp16" : "fp32", in->n_acc16 + in->n_acc32, in->n_conv);
+    else snprintf(b, sizeof b, " mixed accumulate (fp16 %d, fp32 %d of %d layers)", in->n_acc16, in->n_acc32, in->n_conv);
+    return b;
+}
 static int nn_vk_setup(int w, int h)
 {
     nn_vk_free();
@@ -113,6 +121,8 @@ static int nn_vk_setup(int w, int h)
     if (gGetUnsignedBytevEXT) gGetUnsignedBytevEXT(0x9597, uuid);   // GL_DEVICE_UUID_EXT
     const char *be = ravengfx_get("NEURAL_BACKEND"); if (getenv("RAVENNN_BACKEND")) be = getenv("RAVENNN_BACKEND");
     int mode = be && !strcasecmp(be, "plain") ? 1 : be && !strcasecmp(be, "matrix") ? 2 : 0;
+    const char *ac = ravengfx_get("NEURAL_ACCUMULATE"); if (getenv("RAVENNN_ACCUMULATE")) ac = getenv("RAVENNN_ACCUMULATE");
+    rvk_acc_pref = ac && !strcasecmp(ac, "fp16") ? 1 : ac && !strcasecmp(ac, "fp32") ? 2 : 0;   // auto = speed test at start
     static const rvk_net net = { NN_LAYERS, nn_src0, nn_mode0, nn_src1, nn_cin, nn_cout, nn_W, nn_B };
     rvk_info in; double t = now_s();
     // 1. zero-copy sharing (GL_EXT_memory_object_fd/_win32 + GL_EXT_semaphore_fd/_win32)
@@ -141,7 +151,7 @@ static int nn_vk_setup(int w, int h)
         GLenum e = gGetError();
         if (!e) {
             fprintf(stderr, "[ravennn] Vulkan network on %s: %s%s, %d layers, %dx%d, %.2f ms per frame (GPU zero-copy), set-up %.1f s\n",
-                    in.gpu, in.coopmat ? "matrix cores" : "plain kernels", in.coopmat ? (in.acc16 ? " fp16 accumulate" : " fp32 accumulate") : "",
+                    in.gpu, in.coopmat ? "matrix cores" : "plain kernels", nn_acc_desc(&in),
                     NN_LAYERS, w, h, in.ms, now_s() - t);
             nn_vk_ok = 1;
             return 1;
@@ -158,7 +168,7 @@ static int nn_vk_setup(int w, int h)
     nn_host_buf = malloc((size_t)w * h * 8);
     if (!nn_host_buf) { rvk_destroy(); return 0; }
     fprintf(stderr, "[ravennn] Vulkan network on %s: %s%s, %d layers, %dx%d, %.2f ms per frame (host-staged fallback), set-up %.1f s\n",
-            in.gpu, in.coopmat ? "matrix cores" : "plain kernels", in.coopmat ? (in.acc16 ? " fp16 accumulate" : " fp32 accumulate") : "",
+            in.gpu, in.coopmat ? "matrix cores" : "plain kernels", nn_acc_desc(&in),
             NN_LAYERS, w, h, in.ms, now_s() - t);
     nn_vk_ok = 2;
     return 1;

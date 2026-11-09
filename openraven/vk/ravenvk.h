@@ -16,6 +16,7 @@ typedef struct {
     void *in_h, *out_h, *sem_in_h, *sem_out_h; // exported to GL as Win32 NT handles - Windows
     uint64_t in_size, out_size;               // bytes: W*H*8 (RGBA16F) each, allocation sizes
     double ms;                                // GPU time of one run of the whole net (after autotune)
+    int n_conv, n_acc16, n_acc32;             // autotune result: conv layers, how many picked fp16 / fp32 accumulate
 } rvk_info;
 
 // W x H = full frame (even sizes). uuid = GL_DEVICE_UUID_EXT (16 bytes) to pick the same GPU, or NULL.
@@ -29,3 +30,5 @@ int rvk_run(void);
 int rvk_upload(const void *rgba16f);
 int rvk_download(void *rgba16f);
 void rvk_destroy(void);
+// Matrix-core accumulate (set before rvk_init): 0 auto = time both, keep the faster per layer; 1 fp16; 2 fp32.
+extern int rvk_acc_pref;

@@ -74,6 +74,7 @@ static item_t items[] = {
  {"Upscaling","Neural stability","NEURAL_STABLE",T_NUM,1,NULL,0,0.9f,0.1f,"0.6","Higher = less shimmer on moving detail"},
  {"Upscaling","Neural pattern guard","NEURAL_PROTECT",T_NUM,1,NULL,0,1.0f,0.1f,"","Grates/vents: higher = keeps holes clean. Empty = what the network was trained with"},
  {"Upscaling","Neural backend","NEURAL_BACKEND",T_CHOICE,0,"auto|matrix|plain",0,0,0,"auto","Vulkan. auto = matrix cores if the GPU has them (RTX, RX 7000+), else plain (any GPU)"},
+ {"Upscaling","Neural accumulate","NEURAL_ACCUMULATE",T_CHOICE,0,"auto|fp16|fp32",0,0,0,"auto","Matrix cores. auto = quick speed test at start picks the faster per layer"},
  {"Anti-aliasing","SMAA","ENABLE_SMAA",T_CHOICE,0,"0|1",0,0,0,"0","Sharp edge smoothing"},
  {"Anti-aliasing","FXAA","ENABLE_FXAA",T_CHOICE,0,"0|1",0,0,0,"0","Blurs the image; not recommended"},
  {"Anti-aliasing","TAA","ENABLE_TAA",T_CHOICE,0,"0|1",0,0,0,"0","Blurs the image; not recommended"},

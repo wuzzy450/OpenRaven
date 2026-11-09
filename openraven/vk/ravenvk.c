@@ -54,8 +54,9 @@ static PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR;
 
 typedef struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize n; } Buf;
 typedef struct { int w, h, c; Buf b; } Tensor;
-typedef struct { VkPipeline p; uint32_t gx, gy, gz; } Variant;
-typedef struct { VkPipeline p; VkDescriptorSet ds; uint32_t pc[8]; uint32_t gx, gy, gz; Variant alt[10]; int nalt; } Pass;
+typedef struct { VkPipeline p; uint32_t gx, gy, gz; int acc; } Variant;   // acc: 0 plain kernel, 1 fp32 accumulate, 2 fp16 accumulate
+typedef struct { VkPipeline p; VkDescriptorSet ds; uint32_t pc[8]; uint32_t gx, gy, gz; Variant alt[24]; int nalt; } Pass;
+int rvk_acc_pref;   // 0 auto (time fp16 and fp32 accumulate, keep the faster per layer), 1 fp16 only, 2 fp32 only
 
 #define MAXL 64
 #define MAXP 160
@@ -253,7 +254,7 @@ int rvk_init(const rvk_net *net, int W, int H, const uint8_t *uuid, int mode, in
     int cm = cml && fcm.cooperativeMatrix && f16.shaderFloat16 && s16.storageBuffer16BitAccess && fmm.vulkanMemoryModel && sgp.subgroupSize >= 16;
     if (mode == 1) cm = 0;
     if (mode == 2 && !cm) { fail(info, "no matrix cores (16x16x16 fp16) on this GPU"); return 0; }
-    info->coopmat = cm; info->acc16 = cm && cml == 2;
+    info->coopmat = cm; info->acc16 = cm && cml == 2 && rvk_acc_pref != 2;   // fp16 accumulate is a candidate
     if (export_gl && !(has_ext(EXT_MEM) && has_ext(EXT_SEM))) {
         fail(info, "no " EXT_MEM " / " EXT_SEM); return 0;
     }
@@ -360,20 +361,25 @@ int rvk_init(const rvk_net *net, int W, int H, const uint8_t *uuid, int mode, in
         Pass *q = addpass(&in->b, &V.wb[L], &V.bb[L], &V.T[L + 1].b);
         uint32_t pc[] = { ow, oh, in->w + 2, ow + 2 }; memcpy(q->pc, pc, sizeof pc);
         int relu = L < net->nl - 1;
-        if (cm) for (int MT = 1; MT <= 4; MT *= 2) for (int NBS = NB; NBS >= 1 && NBS * 2 >= NB; NBS /= 2) {
-            if (MT * NBS > 8 || NB % NBS || q->nalt >= 10) continue;
-            int sp_[] = { CI, CO, stride, MT, NBS, relu, V.sg };
-            Variant *v = &q->alt[q->nalt];
-            v->p = info->acc16 ? pipeline(spv_cm_a1, sizeof spv_cm_a1, sp_, 7) : pipeline(spv_cm_a0, sizeof spv_cm_a0, sp_, 7);
-            if (!v->p) continue;
-            v->gx = (ow + 16 * MT - 1) / (16 * MT); v->gy = (oh + 3) / 4; v->gz = NB / NBS; q->nalt++;
+        // matrix cores: fp16 accumulate (if the GPU has it) and fp32 accumulate both go into the autotune, because
+        // which is faster depends on the card (GeForce caps fp32 accumulate at half rate unless unlocked).
+        if (cm) for (int acc = 2; acc >= 1; acc--) {
+            if (acc == 2 ? !info->acc16 : rvk_acc_pref == 1 && info->acc16) continue;
+            for (int MT = 1; MT <= 4; MT *= 2) for (int NBS = NB; NBS >= 1 && NBS * 2 >= NB; NBS /= 2) {
+                if (MT * NBS > 8 || NB % NBS || q->nalt >= 21) continue;
+                int sp_[] = { CI, CO, stride, MT, NBS, relu, V.sg };
+                Variant *v = &q->alt[q->nalt];
+                v->p = acc == 2 ? pipeline(spv_cm_a1, sizeof spv_cm_a1, sp_, 7) : pipeline(spv_cm_a0, sizeof spv_cm_a0, sp_, 7);
+                if (!v->p) continue;
+                v->gx = (ow + 16 * MT - 1) / (16 * MT); v->gy = (oh + 3) / 4; v->gz = NB / NBS; v->acc = acc; q->nalt++;
+            }
         }
         for (int cob = 32; cob >= 8; cob /= 2) {     // plain kernels: always there (the fallback)
-            if (CO % cob || q->nalt >= 10) continue;
+            if (CO % cob || q->nalt >= 24) continue;
             int sp_[] = { CI, CO, stride, cob, relu };
             Variant *v = &q->alt[q->nalt];
             if (!(v->p = pipeline(spv_plain, sizeof spv_plain, sp_, 5))) continue;
-            v->gx = (ow + 15) / 16; v->gy = (oh + 7) / 8; v->gz = CO / cob; q->nalt++;
+            v->gx = (ow + 15) / 16; v->gy = (oh + 7) / 8; v->gz = CO / cob; v->acc = 0; q->nalt++;
             if (!V.props.limits.timestampPeriod) break;
         }
         if (!q->nalt) { fail(info, "no conv pipeline could be built"); return 0; }
@@ -398,6 +404,7 @@ int rvk_init(const rvk_net *net, int W, int H, const uint8_t *uuid, int mode, in
         double best = 1e18; int bi = 0;
         for (int a = 0; a < q->nalt; a++) { double ms = time_variant(q, &q->alt[a]); if (ms < best) { best = ms; bi = a; } }
         q->p = q->alt[bi].p; q->gx = q->alt[bi].gx; q->gy = q->alt[bi].gy; q->gz = q->alt[bi].gz;
+        info->n_conv++; if (q->alt[bi].acc == 2) info->n_acc16++; else if (q->alt[bi].acc == 1) info->n_acc32++;
     }
     // the per-frame command buffer
     vkBeginCommandBuffer(V.cb, &cbi);
