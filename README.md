@@ -36,7 +36,7 @@ Out of the box it uses maximum quality, native resolution, and FSR 2 as anti-ali
 
 **You need:** Windows 10 or 11 (64-bit), a graphics card with an up-to-date driver (NVIDIA, AMD or Intel), and about 11 GB of free space.
 
-1. Download OpenRaven: **Code → Download ZIP** at the top of this page, and unzip it anywhere.
+1. Download **`OpenRaven.zip`** from the [latest release](https://github.com/wuzzy450/OpenRaven/releases/latest) and unzip it anywhere (right-click → Extract All).
 2. Double-click **`start_windows.bat`**.
 3. **First run only:** it looks for your game archive in the OpenRaven folder, the folder above it, Downloads and Desktop. If it can't find it, a window opens so you can pick it. Unpacking takes a few minutes.
 4. The game starts fullscreen. Next time, double-clicking `start_windows.bat` starts it straight away.
@@ -44,6 +44,8 @@ Out of the box it uses maximum quality, native resolution, and FSR 2 as anti-ali
 To quit, press **Alt+F4**. If something goes wrong, share `ravenloader.log` from the OpenRaven folder on the [Discord](https://discord.gg/nuvpXycag8).
 
 ### Linux
+
+Download **`OpenRaven.zip`** from the [latest release](https://github.com/wuzzy450/OpenRaven/releases/latest), unzip it, and run `./start_linux.sh` in that folder. Or with git:
 
 ```bash
 git clone https://github.com/wuzzy450/OpenRaven.git

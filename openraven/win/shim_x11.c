@@ -291,22 +291,31 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) { SetCursor(w->cursor == 2 ? NULL : LoadCursor(NULL, IDC_ARROW)); return 1; }
         break;
-    case WM_CLOSE: {
-        unsigned char *e = q_new(ClientMessage, id);
+    }
+    return DefWindowProcA(h, msg, wp, lp);
+}
+
+// Alt+F4 / close button / taskbar "Close window", on any of our windows.
+static LRESULT on_close(HWND h) {
+    xwin *w = W(id_of(h));
+    if (w) {
+        unsigned char *e = q_new(ClientMessage, id_of(h));
         SET(e, 40, uint64_t, g_atom_protocols);
         SET(e, 48, int, 32);
         SET(e, 56, uint64_t, g_atom_delete);
-        // The arcade game ignores WM_DELETE_WINDOW, so quit for it if it is still running shortly after.
-        static LONG closing;
-        if (!InterlockedExchange(&closing, 1)) {
-            raven_log("WM_CLOSE: closing the game\n");
-            HANDLE t = CreateThread(NULL, 0, close_watchdog, NULL, 0, NULL);
-            if (t) CloseHandle(t); else close_watchdog(NULL);
-        }
-        return 0;
     }
+    // The arcade game ignores WM_DELETE_WINDOW, so quit for it if it is still running shortly after.
+    static LONG closing;
+    if (!InterlockedExchange(&closing, 1)) {
+        raven_log("WM_CLOSE: closing the game\n");
+        HANDLE t = CreateThread(NULL, 0, close_watchdog, NULL, 0, NULL);
+        if (t) CloseHandle(t); else close_watchdog(NULL);
     }
-    return DefWindowProcA(h, msg, wp, lp);
+    return 0;
+}
+static LRESULT CALLBACK wndproc_outer(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CLOSE) return on_close(h);
+    return wndproc(h, msg, wp, lp);
 }
 
 static void pump(void) {
@@ -435,7 +444,7 @@ static SV uint64_t s_XCreateWindow(void *d, uint64_t parent, int x, int y, unsig
     if (!g_class) {
         WNDCLASSA wc = {0};
         wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc = wndproc;
+        wc.lpfnWndProc = wndproc_outer;
         wc.hInstance = GetModuleHandleA(NULL);
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
         wc.lpszClassName = "RavenX11";
