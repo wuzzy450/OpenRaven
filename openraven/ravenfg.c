@@ -35,6 +35,7 @@ void raven_fg_swap(void);   // shim_glx.c: SwapBuffers on the game window
 #define fprintf(f, ...) raven_log(__VA_ARGS__)
 #define getenv raven_env
 #define strncasecmp _strnicmp
+#define strcasecmp _stricmp
 #else
 #include <dlfcn.h>
 #endif
@@ -47,7 +48,8 @@ void ravengfx_capture(const char *path);
 extern float ravengfx_fg_fps;            // displayed frames per second (real + generated)
 
 #ifdef _WIN32
-static void *gpa(const char *n) { return gl_resolve(n); }
+void *gl_resolve_opt(const char *name);
+static void *gpa(const char *n) { return gl_resolve_opt(n); }   // missing = NULL (ravenfg/ravennn check)
 static void w_swap(void *d, unsigned long w) { (void)d; (void)w; raven_fg_swap(); }
 static void *w_dpy(void) { return (void *)1; }
 static unsigned long w_drw(void) { return 1; }
@@ -484,13 +486,7 @@ static void pace(double target)
     if (target > t + 0.0005) { struct timespec ts = {0, (long)((target - t - 0.0003) * 1e9)}; nanosleep(&ts, NULL); slept += now_s() - t; }
 }
 
-#ifdef _WIN32
-// Neural pass not ported yet (step 5): off on Windows.
-static GLuint nn_in, nn_pin; static int nn_w, nn_h_;
-static void nn_apply(int w, int h) { (void)w; (void)h; static int said; if (!said++) fprintf(stderr, "[ravenfg] NEURAL not available on Windows yet, ignored\n"); }
-#else
 #include "ravennn.inc"
-#endif
 
 // RAVENFG_SHOT=1: capture generated frames next to the real-frame shots (one set per shot time)
 static int fg_shot_pending; static char fg_shot_base[480];

@@ -1,0 +1,49 @@
+module	library	symbol
+F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/3.11-dec/pm/g7/halo/halo.so	ld-linux-x86-64.so.2	_r_debug
+F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/3.11-dec/pm/g7/halo/halo.so	libdl.so.2	dladdr1
+F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/3.11-dec/pm/g7/halo/halo.so	libdl.so.2	dlinfo
+# copy _ZTVN10__cxxabiv121__vmi_class_type_infoE (88 bytes) from F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/cabinet_libs/lib/x86_64-linux-gnu/libstdc++.so.6
+# copy _ZTVN10__cxxabiv117__class_type_infoE (88 bytes) from F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/cabinet_libs/lib/x86_64-linux-gnu/libstdc++.so.6
+# copy _ZTVN10__cxxabiv120__si_class_type_infoE (88 bytes) from F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/cabinet_libs/lib/x86_64-linux-gnu/libstdc++.so.6
+# copy _ZTISt9exception (16 bytes) from F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/cabinet_libs/lib/x86_64-linux-gnu/libstdc++.so.6
+# copy _ZNSs4_Rep20_S_empty_rep_storageE (32 bytes) from F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/cabinet_libs/lib/x86_64-linux-gnu/libstdc++.so.6
+# copy _ZSt7nothrow (1 bytes) from F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/cabinet_libs/lib/x86_64-linux-gnu/libstdc++.so.6
+# F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/3.11-dec/pm/g7/halo/game base=0000000000400000 size=0x1fd3000 entry=0000000000414600 tls=no(0x0) tls_relocs=0 fs_prefix_hits~10534 syscall_hits~215
+#   needs libGL.so.1
+#   needs libGLU.so.1
+#   needs libpthread.so.0
+#   needs libdl.so.2
+#   needs libudev.so.1
+#   needs liblapack.so.3
+#   needs libiw.so.30
+#   needs libfmod.so.10
+#   needs libfmodstudio.so.10
+#   needs libstdc++.so.6
+#   needs libm.so.6
+#   needs libgcc_s.so.1
+#   needs libc.so.6
+# F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/3.11-dec/pm/g7/halo/halo.so base=0000000004540000 size=0x2d2000 entry=0000000004544D00 tls=yes(0x28) tls_relocs=10 fs_prefix_hits~86 syscall_hits~36
+#   needs libdl.so.2
+#   needs libc.so.6
+#   needs ld-linux-x86-64.so.2
+# F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/cabinet_libs/lib/x86_64-linux-gnu/libstdc++.so.6 base=00000000049B0000 size=0x389000 entry=0000000004A3C490 tls=yes(0x20) tls_relocs=5 fs_prefix_hits~1647 syscall_hits~13
+#   needs libm.so.6
+#   needs libc.so.6
+#   needs ld-linux-x86-64.so.2
+#   needs libgcc_s.so.1
+# F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/cabinet_libs/lib/x86_64-linux-gnu/libgcc_s.so.1 base=0000000004D40000 size=0x218000 entry=0000000004D42AC0 tls=no(0x0) tls_relocs=0 fs_prefix_hits~2 syscall_hits~1
+#   needs libc.so.6
+# F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/extralibs/libfmod.so.10 base=0000000004F60000 size=0x3c5000 entry=0000000004F84CB0 tls=no(0x0) tls_relocs=0 fs_prefix_hits~49 syscall_hits~4
+#   needs libdl.so.2
+#   needs librt.so.1
+#   needs libstdc++.so.6
+#   needs libm.so.6
+#   needs libpthread.so.0
+#   needs libc.so.6
+# F:/Halo Fireteam Raven (3.11)(2018)[Raw Thrills][TP]/openraven/extralibs/libfmodstudio.so.10 base=0000000005330000 size=0x373000 entry=000000000534E930 tls=no(0x0) tls_relocs=0 fs_prefix_hits~54 syscall_hits~3
+#   needs librt.so.1
+#   needs libfmod.so.10
+#   needs libstdc++.so.6
+#   needs libm.so.6
+#   needs libpthread.so.0
+#   needs libc.so.6

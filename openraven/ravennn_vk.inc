@@ -3,134 +3,27 @@
 // Per frame: window -> nn_in (GL) -> GL-shared Vulkan buffer (RGBA16F) -> Vulkan U-Net (matrix cores where
 // the GPU has them, plain kernels otherwise) -> shared buffer: residual + the input's 3x3 contrast in
 // alpha -> nn_full (mip levels: 16x16 mean of the residual at level 4, 8x8 contrast mean at level 3) ->
-// final pass (guard, pattern guard, temporal stabilising) -> window. GL and Vulkan sync with shared
-// semaphores (GL_EXT_memory_object_fd / GL_EXT_semaphore_fd), or via native Windows Vulkan / host staging on WSL2.
+// final pass (guard, pattern guard, temporal stabilising) -> window. GL and Vulkan share memory and
+// semaphores (Linux: GL_EXT_memory_object_fd / semaphore_fd; Windows: the _win32 versions), else host staging.
 // NEURAL_BACKEND = auto | plain | matrix (restart): auto = matrix cores when present (+ autotune per layer).
 #include "vk/ravenvk.h"
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
 
 static int nn_ok = -1; static float nn_stable = 0.6f;
 static GLuint nn_prog_final, nn_fb[2], nn_in, nn_pin, nn_res[2], nn_out, nn_full;
 static int nn_w, nn_h_, nn_ri, nn_have_prev;
 static GLuint nn_glbuf[2], nn_glmem[2], nn_glsem[2];
-static int nn_vk_ok;   // 1 = zero-copy fd interop, 2 = host-staging fallback, 3 = Windows native Vulkan RPC (WSL2)
+static int nn_vk_ok;   // 1 = zero-copy GL/Vulkan sharing, 2 = host-staging fallback
 static void *nn_host_buf;
-static int nn_win_sock = -1;
-
-#pragma pack(push, 1)
-typedef struct {
-    uint32_t magic;      // 0x52564B31 ("RVK1")
-    int32_t  W, H, mode;
-    uint8_t  uuid[16];
-    int32_t  nl;
-    int32_t  src0[64], mode0[64], src1[64], cin[64], cout[64];
-} rvk_rpc_init_req;
-
-typedef struct {
-    int32_t  ok, coopmat, acc16;
-    char     gpu[256], why[256];
-    double   ms;
-} rvk_rpc_init_resp;
-#pragma pack(pop)
-
-static int nn_rpc_read(int s, void *buf, size_t n) {
-    char *p = (char *)buf;
-    while (n > 0) {
-        ssize_t r = recv(s, p, n > 0x4000000 ? 0x4000000 : n, 0);
-        if (r <= 0) return 0;
-        p += r; n -= (size_t)r;
-    }
-    return 1;
-}
-
-static int nn_rpc_write(int s, const void *buf, size_t n) {
-    const char *p = (const char *)buf;
-    while (n > 0) {
-        ssize_t r = send(s, p, n > 0x4000000 ? 0x4000000 : n, MSG_NOSIGNAL);
-        if (r <= 0) return 0;
-        p += r; n -= (size_t)r;
-    }
-    return 1;
-}
-
-static int nn_win_vk_init(const rvk_net *net, int w, int h, const unsigned char *uuid, int mode, rvk_info *in) {
-    const char *addr_str = getenv("RAVENVK_WIN_SERVER");
-    if (!addr_str || !*addr_str) return 0;
-    char host[128] = "127.0.0.1";
-    int port = 28765;
-    const char *colon = strchr(addr_str, ':');
-    if (colon) {
-        size_t hl = (size_t)(colon - addr_str);
-        if (hl > 0 && hl < sizeof host) { memcpy(host, addr_str, hl); host[hl] = 0; }
-        port = atoi(colon + 1);
-    } else {
-        port = atoi(addr_str);
-    }
-    if (port <= 0) port = 28765;
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return 0;
-    int one = 1;
-    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    int bsz = 16 * 1024 * 1024;
-    setsockopt(s, SOL_SOCKET, SO_RCVBUF, &bsz, sizeof bsz);
-    setsockopt(s, SOL_SOCKET, SO_SNDBUF, &bsz, sizeof bsz);
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET, host, &sa.sin_addr) <= 0 || connect(s, (struct sockaddr *)&sa, sizeof sa) != 0) {
-        if (strcmp(host, "127.0.0.1") != 0) {
-            inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
-            if (connect(s, (struct sockaddr *)&sa, sizeof sa) != 0) { close(s); return 0; }
-        } else {
-            close(s); return 0;
-        }
-    }
-    uint8_t cmd = 1;
-    rvk_rpc_init_req req;
-    memset(&req, 0, sizeof req);
-    req.magic = 0x52564B31u;
-    req.W = w; req.H = h; req.mode = mode;
-    if (uuid) memcpy(req.uuid, uuid, 16);
-    req.nl = net->nl;
-    for (int l = 0; l < net->nl; l++) {
-        req.src0[l] = net->src0[l]; req.mode0[l] = net->mode0[l];
-        req.src1[l] = net->src1[l]; req.cin[l] = net->cin[l]; req.cout[l] = net->cout[l];
-    }
-    if (!nn_rpc_write(s, &cmd, 1) || !nn_rpc_write(s, &req, sizeof req)) { close(s); return 0; }
-    for (int l = 0; l < net->nl; l++) {
-        size_t nw = (size_t)net->cin[l] * (size_t)net->cout[l] * 9 * sizeof(float);
-        size_t nb = (size_t)net->cout[l] * sizeof(float);
-        if (!nn_rpc_write(s, net->w[l], nw) || !nn_rpc_write(s, net->b[l], nb)) { close(s); return 0; }
-    }
-    rvk_rpc_init_resp resp;
-    if (!nn_rpc_read(s, &resp, sizeof resp) || !resp.ok) {
-        if (in) {
-            snprintf(in->gpu, sizeof in->gpu, "%s", resp.gpu);
-            snprintf(in->why, sizeof in->why, "%s", resp.why[0] ? resp.why : "Windows Vulkan worker init failed");
-        }
-        close(s); return 0;
-    }
-    memset(in, 0, sizeof *in);
-    in->ok = 1; in->coopmat = resp.coopmat; in->acc16 = resp.acc16; in->ms = resp.ms;
-    snprintf(in->gpu, sizeof in->gpu, "%s", resp.gpu);
-    nn_win_sock = s;
-    return 1;
-}
 G(void, gDrawBuffers, (int, const GLenum *)) G(void, gUniform2i, (GLint, GLint, GLint)) G(void, gGenerateMipmap, (GLenum))
 G(void, gGetTexImage, (GLenum, GLint, GLenum, GLenum, void *)) G(void, gTexSubImage2D, (GLenum, GLint, GLint, GLint, int, int, GLenum, GLenum, const void *))
 G(void, gGenBuffers, (int, GLuint *)) G(void, gDeleteBuffers, (int, const GLuint *)) G(void, gBindBuffer, (GLenum, GLuint))
 G(void, gPixelStorei, (GLenum, GLint)) G(void, gGetUnsignedBytevEXT, (GLenum, unsigned char *))
 G(void, gCreateMemoryObjectsEXT, (int, GLuint *)) G(void, gDeleteMemoryObjectsEXT, (int, const GLuint *))
-G(void, gImportMemoryFdEXT, (GLuint, uint64_t, GLenum, GLint)) G(void, gBufferStorageMemEXT, (GLenum, intptr_t, GLuint, uint64_t))
-G(void, gGenSemaphoresEXT, (int, GLuint *)) G(void, gDeleteSemaphoresEXT, (int, const GLuint *)) G(void, gImportSemaphoreFdEXT, (GLuint, GLenum, GLint))
+G(void, gImportMemoryFdEXT, (GLuint, uint64_t, GLenum, GLint)) G(void, gImportMemoryWin32HandleEXT, (GLuint, uint64_t, GLenum, void *)) G(void, gBufferStorageMemEXT, (GLenum, intptr_t, GLuint, uint64_t))
+G(void, gGenSemaphoresEXT, (int, GLuint *)) G(void, gDeleteSemaphoresEXT, (int, const GLuint *)) G(void, gImportSemaphoreFdEXT, (GLuint, GLenum, GLint)) G(void, gImportSemaphoreWin32HandleEXT, (GLuint, GLenum, void *))
 G(void, gSignalSemaphoreEXT, (GLuint, GLuint, const GLuint *, GLuint, const GLuint *, const GLenum *))
 G(void, gWaitSemaphoreEXT, (GLuint, GLuint, const GLuint *, GLuint, const GLuint *, const GLenum *))
-G(GLenum, gGetError, (void))
+G(GLenum, gGetError, (void)) G(void, gReadPixels, (GLint, GLint, int, int, GLenum, GLenum, void *))
 static int nn_has_ext_interop;
 
 static char *nn_src; static size_t nn_len, nn_cap;
@@ -179,7 +72,7 @@ static int nn_init(void)
 #define L(v, n) if (!(v = (__typeof__(v))gpa(n))) { fprintf(stderr, "[ravennn] missing %s, neural pass off\n", n); return 0; }
     L(gDrawBuffers, "glDrawBuffers") L(gUniform2i, "glUniform2i") L(gGenerateMipmap, "glGenerateMipmap")
     L(gGetTexImage, "glGetTexImage") L(gTexSubImage2D, "glTexSubImage2D") L(gGenBuffers, "glGenBuffers")
-    L(gDeleteBuffers, "glDeleteBuffers") L(gBindBuffer, "glBindBuffer") L(gPixelStorei, "glPixelStorei") L(gGetError, "glGetError")
+    L(gDeleteBuffers, "glDeleteBuffers") L(gBindBuffer, "glBindBuffer") L(gPixelStorei, "glPixelStorei") L(gGetError, "glGetError") L(gReadPixels, "glReadPixels")
 #undef L
 #define O(v, n) v = (__typeof__(v))gpa(n);
     O(gGetUnsignedBytevEXT, "glGetUnsignedBytevEXT") O(gCreateMemoryObjectsEXT, "glCreateMemoryObjectsEXT")
@@ -187,8 +80,13 @@ static int nn_init(void)
     O(gBufferStorageMemEXT, "glBufferStorageMemEXT") O(gGenSemaphoresEXT, "glGenSemaphoresEXT")
     O(gDeleteSemaphoresEXT, "glDeleteSemaphoresEXT") O(gImportSemaphoreFdEXT, "glImportSemaphoreFdEXT")
     O(gSignalSemaphoreEXT, "glSignalSemaphoreEXT") O(gWaitSemaphoreEXT, "glWaitSemaphoreEXT")
+    O(gImportMemoryWin32HandleEXT, "glImportMemoryWin32HandleEXT") O(gImportSemaphoreWin32HandleEXT, "glImportSemaphoreWin32HandleEXT")
 #undef O
+#ifdef _WIN32
+    nn_has_ext_interop = gCreateMemoryObjectsEXT && gImportMemoryWin32HandleEXT && gBufferStorageMemEXT && gGenSemaphoresEXT && gImportSemaphoreWin32HandleEXT && gSignalSemaphoreEXT && gWaitSemaphoreEXT;
+#else
     nn_has_ext_interop = gCreateMemoryObjectsEXT && gImportMemoryFdEXT && gBufferStorageMemEXT && gGenSemaphoresEXT && gImportSemaphoreFdEXT && gSignalSemaphoreEXT && gWaitSemaphoreEXT;
+#endif
     gen_final(); if (!(nn_prog_final = nn_link())) return 0;
     free(nn_src); nn_src = NULL; nn_cap = 0;
     gGenFramebuffers(2, nn_fb);
@@ -205,13 +103,6 @@ static void nn_vk_free(void)
 {
     if (nn_glbuf[0]) { gDeleteBuffers(2, nn_glbuf); gDeleteMemoryObjectsEXT(2, nn_glmem); gDeleteSemaphoresEXT(2, nn_glsem); }
     nn_glbuf[0] = nn_glbuf[1] = 0;
-    if (nn_win_sock >= 0) {
-        uint8_t cmd = 3, ack = 0;
-        nn_rpc_write(nn_win_sock, &cmd, 1);
-        nn_rpc_read(nn_win_sock, &ack, 1);
-        close(nn_win_sock);
-        nn_win_sock = -1;
-    }
     free(nn_host_buf); nn_host_buf = NULL;
     rvk_destroy(); nn_vk_ok = 0;
 }
@@ -224,30 +115,29 @@ static int nn_vk_setup(int w, int h)
     int mode = be && !strcasecmp(be, "plain") ? 1 : be && !strcasecmp(be, "matrix") ? 2 : 0;
     static const rvk_net net = { NN_LAYERS, nn_src0, nn_mode0, nn_src1, nn_cin, nn_cout, nn_W, nn_B };
     rvk_info in; double t = now_s();
-    // 1. If running on Windows WSL2 with the native Windows Vulkan worker (RAVENVK_WIN_SERVER), use native Windows vulkan-1.dll (full matrix cores + FP16 accumulate)
-    if (getenv("RAVENVK_WIN_SERVER") && nn_win_vk_init(&net, w, h, uuid, mode, &in)) {
-        nn_host_buf = malloc((size_t)w * h * 8);
-        if (nn_host_buf) {
-            fprintf(stderr, "[ravennn] Native Windows Vulkan network on %s: %s%s, %d layers, %dx%d, %.2f ms per frame, set-up %.1f s\n",
-                    in.gpu, in.coopmat ? "matrix cores" : "plain kernels", in.coopmat ? (in.acc16 ? " fp16 accumulate" : " fp32 accumulate") : "",
-                    NN_LAYERS, w, h, in.ms, now_s() - t);
-            nn_vk_ok = 3;
-            return 1;
-        }
-        nn_vk_free();
-    }
-    // 2. Native Linux GPU zero-copy interop (GL_EXT_memory_object_fd + GL_EXT_semaphore_fd)
+    // 1. zero-copy sharing (GL_EXT_memory_object_fd/_win32 + GL_EXT_semaphore_fd/_win32)
     int try_export = nn_has_ext_interop && !getenv("RAVENNN_HOSTSTAGE");
     if (try_export && rvk_init(&net, w, h, uuid, mode, 1, &in)) {
         while (gGetError()) ;
         gCreateMemoryObjectsEXT(2, nn_glmem); gGenBuffers(2, nn_glbuf); gGenSemaphoresEXT(2, nn_glsem);
-        int fds[2] = { in.in_fd, in.out_fd }; uint64_t sz[2] = { in.in_size, in.out_size };
+        uint64_t sz[2] = { in.in_size, in.out_size };
+#ifndef _WIN32
+        int fds[2] = { in.in_fd, in.out_fd };
+#endif
         for (int i = 0; i < 2; i++) {
+#ifdef _WIN32
+            gImportMemoryWin32HandleEXT(nn_glmem[i], sz[i], 0x9587, i ? in.out_h : in.in_h);   // GL_HANDLE_TYPE_OPAQUE_WIN32_EXT
+#else
             gImportMemoryFdEXT(nn_glmem[i], sz[i], 0x9586, fds[i]);              // GL_HANDLE_TYPE_OPAQUE_FD_EXT (GL owns the fd now)
+#endif
             gBindBuffer(0x88EB, nn_glbuf[i]); gBufferStorageMemEXT(0x88EB, (intptr_t)w * h * 8, nn_glmem[i], 0);
         }
         gBindBuffer(0x88EB, 0);
+#ifdef _WIN32
+        gImportSemaphoreWin32HandleEXT(nn_glsem[0], 0x9587, in.sem_in_h); gImportSemaphoreWin32HandleEXT(nn_glsem[1], 0x9587, in.sem_out_h);
+#else
         gImportSemaphoreFdEXT(nn_glsem[0], 0x9586, in.sem_in_fd); gImportSemaphoreFdEXT(nn_glsem[1], 0x9586, in.sem_out_fd);
+#endif
         GLenum e = gGetError();
         if (!e) {
             fprintf(stderr, "[ravennn] Vulkan network on %s: %s%s, %d layers, %dx%d, %.2f ms per frame (GPU zero-copy), set-up %.1f s\n",
@@ -267,7 +157,7 @@ static int nn_vk_setup(int w, int h)
     }
     nn_host_buf = malloc((size_t)w * h * 8);
     if (!nn_host_buf) { rvk_destroy(); return 0; }
-    fprintf(stderr, "[ravennn] Vulkan network on %s: %s%s, %d layers, %dx%d, %.2f ms per frame (host-staged WSL2/fallback), set-up %.1f s\n",
+    fprintf(stderr, "[ravennn] Vulkan network on %s: %s%s, %d layers, %dx%d, %.2f ms per frame (host-staged fallback), set-up %.1f s\n",
             in.gpu, in.coopmat ? "matrix cores" : "plain kernels", in.coopmat ? (in.acc16 ? " fp16 accumulate" : " fp32 accumulate") : "",
             NN_LAYERS, w, h, in.ms, now_s() - t);
     nn_vk_ok = 2;
@@ -288,10 +178,55 @@ static void nn_resize(int w, int h)
     nn_w = w; nn_h_ = h; nn_have_prev = 0;
     nn_vk_setup(w & ~1, h & ~1);
 }
+// nn_in -> dst (pack buffer offset or host memory), RGBA16F, vw x vh. Odd sizes (the Windows window is
+// 1 px taller): drop the bottom row / right column, so GL row y = buffer row y - (h - vh) and the
+// top-down output row r = h - 1 - y, which is what the final pass reads.
+static void nn_read_in(int w, int h, int vw, int vh, void *dst)
+{
+    if (vw == w && vh == h) { gBindTexture(0x0DE1, nn_in); gGetTexImage(0x0DE1, 0, 0x1908, 0x140B, dst); return; }
+    gBindFramebuffer(0x8CA8, nn_fb[0]); gFramebufferTexture2D(0x8CA8, 0x8CE0, 0x0DE1, nn_in, 0); gReadBuffer(0x8CE0);
+    gReadPixels(0, h - vh, vw, vh, 0x1908, 0x140B, dst);
+    gFramebufferTexture2D(0x8CA8, 0x8CE0, 0x0DE1, 0, 0); gBindFramebuffer(0x8CA8, 0);
+}
 static void nn_bind(GLuint pr, const char *nm, int unit, GLuint tex)
 {
     gActiveTexture(0x84C0 + unit); gBindSampler(unit, 0); gBindTexture(0x0DE1, tex); gUniform1i(gGetUniformLocation(pr, nm), unit);
 }
+#ifdef _WIN32
+// RAVENNN_PAIR_EVERY=N: every N neural frames, save this frame before (nn_in) and after (nn_out) the pass
+// as nnpair/NNNNNN_off.ppm / _on.ppm (same frame, HUD not drawn yet), for quality comparisons.
+static void nn_save_ppm(GLuint tex, int w, int h, const char *path)
+{
+    unsigned char *b = malloc((size_t)w * h * 3); if (!b) return;
+    gBindFramebuffer(0x8CA8, nn_fb[0]); gFramebufferTexture2D(0x8CA8, 0x8CE0, 0x0DE1, tex, 0); gReadBuffer(0x8CE0);
+    gPixelStorei(0x0D05, 1); gPixelStorei(0x0D02, 0);
+    gReadPixels(0, 0, w, h, 0x1907, 0x1401, b);   // RGB, UNSIGNED_BYTE
+    gFramebufferTexture2D(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
+    FILE *f = fopen(path, "wb");
+    if (f) { char hd[48]; int hl = snprintf(hd, sizeof hd, "P6\n%d %d\n255\n", w, h); fwrite(hd, 1, hl, f); for (int y = h - 1; y >= 0; y--) fwrite(b + (size_t)y * w * 3, 1, (size_t)w * 3, f); fclose(f); }
+    free(b);
+}
+static void nn_pair(int w, int h)
+{
+    // RAVENNN_PAIR_KEY=1: F9 toggles saving on/off (every RAVENNN_PAIR_EVERY frames, default 15)
+    static int every = -1, n, keymode, on, was;
+    if (every < 0) { keymode = getenv("RAVENNN_PAIR_KEY") && atoi(getenv("RAVENNN_PAIR_KEY")) > 0;
+        every = getenv("RAVENNN_PAIR_EVERY") ? atoi(getenv("RAVENNN_PAIR_EVERY")) : keymode ? 15 : 0; }
+    ++n;
+    if (keymode) {
+        SHORT ks = GetAsyncKeyState(VK_F9);   // bit 0 = pressed since last call (a tap during a slow save frame)
+        int down = (ks & 0x8000) != 0;
+        if ((down && !was) || (!down && (ks & 1))) { on = !on; raven_log("[ravennn] F9: pair capture %s (frame %d)\n", on ? "ON" : "OFF", n); MessageBeep(on ? MB_OK : MB_ICONHAND); }
+        was = down;
+        if (!on) return;
+    }
+    if (every <= 0 || n % every) return;
+    char p[64]; CreateDirectoryA("nnpair", NULL);
+    snprintf(p, sizeof p, "nnpair/%06d_off.ppm", n); nn_save_ppm(nn_in, w, h, p);
+    snprintf(p, sizeof p, "nnpair/%06d_on.ppm", n); nn_save_ppm(nn_out, w, h, p);
+    raven_log("[ravennn] pair %d saved\n", n);
+}
+#endif
 // Run the network on the window's back buffer, in place. Called right before the HUD is drawn.
 static void nn_apply(int w, int h)
 {
@@ -315,8 +250,8 @@ static void nn_apply(int w, int h)
     gPixelStorei(0x0D05, 8); gPixelStorei(0x0CF5, 8); gPixelStorei(0x0D02, vw); gPixelStorei(0x0CF2, vw);
     static int vt = -1; if (vt < 0) vt = getenv("RAVENNN_VKTEST") ? atoi(getenv("RAVENNN_VKTEST")) : 0;   // timing tests: 1 = no Vulkan run, 2 = no copies either
     if (nn_vk_ok == 1) {
-        gBindTexture(0x0DE1, nn_in); gBindBuffer(0x88EB, nn_glbuf[0]);
-        if (vw == w && vh == h && vt < 2) gGetTexImage(0x0DE1, 0, 0x1908, 0x140B, 0);    // RGBA, HALF_FLOAT
+        gBindBuffer(0x88EB, nn_glbuf[0]);
+        if (vt < 2) nn_read_in(w, h, vw, vh, 0);    // RGBA, HALF_FLOAT
         gBindBuffer(0x88EB, 0);
         if (!vt) {
             gSignalSemaphoreEXT(nn_glsem[0], 1, &nn_glbuf[0], 0, NULL, NULL);
@@ -327,21 +262,11 @@ static void nn_apply(int w, int h)
         gBindTexture(0x0DE1, nn_full); gBindBuffer(0x88EC, nn_glbuf[1]);
         if (vt < 2) gTexSubImage2D(0x0DE1, 0, 0, 0, vw, vh, 0x1908, 0x140B, 0);
         gBindBuffer(0x88EC, 0); gGenerateMipmap(0x0DE1); gBindTexture(0x0DE1, 0);
-    } else if ((nn_vk_ok == 2 || nn_vk_ok == 3) && nn_host_buf) {
+    } else if (nn_vk_ok == 2 && nn_host_buf) {
         gBindBuffer(0x88EB, 0); gBindBuffer(0x88EC, 0);
-        gBindTexture(0x0DE1, nn_in);
-        if (vw == w && vh == h && vt < 2) gGetTexImage(0x0DE1, 0, 0x1908, 0x140B, nn_host_buf);
+        if (vt < 2) nn_read_in(w, h, vw, vh, nn_host_buf);
         if (!vt) {
-            if (nn_vk_ok == 3 && nn_win_sock >= 0) {
-                uint8_t cmd = 2, status = 0;
-                size_t nbytes = (size_t)vw * (size_t)vh * 8;
-                if (!nn_rpc_write(nn_win_sock, &cmd, 1) ||
-                    !nn_rpc_write(nn_win_sock, nn_host_buf, nbytes) ||
-                    !nn_rpc_read(nn_win_sock, &status, 1) ||
-                    (status && !nn_rpc_read(nn_win_sock, nn_host_buf, nbytes))) {
-                    close(nn_win_sock); nn_win_sock = -1; nn_vk_ok = 0;
-                }
-            } else {
+            {
                 rvk_upload(nn_host_buf);
                 rvk_run();
                 rvk_download(nn_host_buf);
@@ -371,6 +296,9 @@ static void nn_apply(int w, int h)
     gBindFramebuffer(0x8CA8, nn_fb[1]); gReadBuffer(0x8CE0);
     gBindFramebuffer(0x8CA9, 0); gDrawBuffer(0x0405);
     gBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x4000, 0x2600);
+#ifdef _WIN32
+    { GLint pa2 = 4, prl2 = 0; gGetIntegerv(0x0D05, &pa2); gGetIntegerv(0x0D02, &prl2); nn_pair(w, h); gPixelStorei(0x0D05, pa2); gPixelStorei(0x0D02, prl2); }
+#endif
     { GLuint t = nn_pin; nn_pin = nn_in; nn_in = t; }    // this frame's input becomes "previous"
     nn_ri ^= 1; nn_have_prev = 1;
     restore(&s);

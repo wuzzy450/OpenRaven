@@ -12,7 +12,8 @@ typedef struct {
 typedef struct {
     int ok, coopmat, acc16;                   // after rvk_init
     char gpu[256], why[256];                  // device name / reason it is off
-    int in_fd, out_fd, sem_in_fd, sem_out_fd; // exported to GL (-1 when not exported)
+    int in_fd, out_fd, sem_in_fd, sem_out_fd; // exported to GL (-1 when not exported) - Linux
+    void *in_h, *out_h, *sem_in_h, *sem_out_h; // exported to GL as Win32 NT handles - Windows
     uint64_t in_size, out_size;               // bytes: W*H*8 (RGBA16F) each, allocation sizes
     double ms;                                // GPU time of one run of the whole net (after autotune)
 } rvk_info;

@@ -183,6 +183,21 @@ attract mode at 58-60 FPS, graphics.ini values reach the engine.
 - Linux HDR: not possible on the X11/GLX path (no HDR signalling). Would need a Vulkan/Wayland present
   (gamescope). Not started.
 
+### Update 2026-11-08: neural pass runs natively (step 1, first part)
+- `ravenfg.c` now includes `ravennn.inc` on Windows; `vk/ravenvk.c` is built into ravenloader.exe (MSYS2
+  `mingw-w64-clang-x86_64-vulkan-headers` installed; vulkan-1.dll loaded at run time). Zero-copy sharing via
+  `VK_KHR_external_memory_win32`/`_semaphore_win32` + `glImportMemoryWin32HandleEXT`/`glImportSemaphoreWin32HandleEXT`.
+  On Windows a non-matching GL UUID fails instead of picking another GPU (P40). WSL TCP daemon path removed from
+  `ravennn_vk.inc`. `gpa()` in ravenfg uses the new `gl_resolve_opt` (NULL, not FATAL, for missing extensions).
+- Log: `RTX 3080: matrix cores fp16 accumulate, 21 layers, 3840x2160, 8.65 ms per frame (GPU zero-copy)`.
+- Bug fixed: the 1 px taller window (2161) made the input copy skip (odd height) -> net ran on an empty
+  frame. `nn_read_in` now drops the bottom row on odd sizes.
+- Cost: attract scene ~49 FPS without neural -> ~35 FPS with it (user's max settings, 4K, FSR native).
+- `RAVENNN_PAIR_EVERY=N` saves before/after PPMs of the same frame to `pm/g7/halo/nnpair/`; comparison
+  crops in `openraven/nn_compare/`. Result: armor gets finer grit/scratches (+50-58% edge energy); smooth
+  space backdrops get unwanted "wormy" patterns and blotches.
+- Not done yet: fp16 vs fp32 PSNR check, Linux-picture match, check that ravenvk_win_daemon.c can be deleted.
+
 ### Default settings for new players (user decision 2026-11-08)
 `github_staging/openraven/graphics.ini` = what new players get: max quality (aniso 16, shadows 8192 x 4 cascades,
 stable shadows, SSR 1.0, SSAO, lens flare), native resolution, RENDER_SCALE 1.0, VSync on, FSR 2 at native as AA
@@ -246,7 +261,7 @@ Each step: build, run, check `ravenloader.log`, update this file. Never save scr
 the user's `openraven/graphics.ini` (see "Default settings for new players").
 
 1. **Neural rendering on Windows: Vulkan, in-process, FP16 accumulation (user's top priority).**
-   Ship only the v9 network (SeedVR2 teacher, flat-area fix): `neural/raven_nn_weights.h` (= `raven_nn9_weights.h`,
+   Ship only the v9 network (v8 fine-tuned on smooth tiles, see NEXT_STEPS_LINUX_V9.md): `neural/raven_nn_weights.h` (= `raven_nn9_weights.h`,
    sha256 3288eed6...). No other weights in the repo.
    What exists: `ravennn.inc` -> `ravennn_vk.inc` (GL final pass + Vulkan network) and `vk/ravenvk.c`
    (device setup, `rvk_init`, cooperative-matrix detection: level 2 = fp16 accumulate works, 1 = fp32

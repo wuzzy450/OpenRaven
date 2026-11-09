@@ -2,14 +2,24 @@
 // Shaders are compiled SPIR-V (ravenvk_spv.h, made by build_vk.sh) with every size as a specialization
 // constant. Each conv layer is timed in its variants at start-up (autotune) and the fastest is kept.
 #define VK_NO_PROTOTYPES
-#include <vulkan/vulkan.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_win32.h>
+#define EXT_MEM  "VK_KHR_external_memory_win32"
+#define EXT_SEM  "VK_KHR_external_semaphore_win32"
+#define HT_MEM   VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT
+#define HT_SEM   VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT
 #define dlopen(name, flags) ((void *)LoadLibraryA("vulkan-1.dll"))
 #define dlsym(lib, sym)     ((void *)GetProcAddress((HMODULE)(lib), (sym)))
 #else
+#include <vulkan/vulkan.h>
 #include <dlfcn.h>
+#define EXT_MEM  "VK_KHR_external_memory_fd"
+#define EXT_SEM  "VK_KHR_external_semaphore_fd"
+#define HT_MEM   VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
+#define HT_SEM   VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,8 +44,13 @@
 VK_FUNCS(F) DEV_FUNCS(F) static PFN_vkCreateInstance vkCreateInstance;
 static PFN_vkGetInstanceProcAddr gipa;
 static PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR;
+#ifdef _WIN32
+static PFN_vkGetMemoryWin32HandleKHR vkGetMemoryWin32HandleKHR;
+static PFN_vkGetSemaphoreWin32HandleKHR vkGetSemaphoreWin32HandleKHR;
+#else
 static PFN_vkGetMemoryFdKHR vkGetMemoryFdKHR;
 static PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR;
+#endif
 
 typedef struct { VkBuffer b; VkDeviceMemory m; VkDeviceSize n; } Buf;
 typedef struct { int w, h, c; Buf b; } Tensor;
@@ -67,7 +82,7 @@ static int memtype(uint32_t bits, VkMemoryPropertyFlags want) {
 }
 static int mkbuf(Buf *r, VkDeviceSize n, int host, int exportable) {
     r->n = n;
-    VkExternalMemoryBufferCreateInfo eb = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
+    VkExternalMemoryBufferCreateInfo eb = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, .handleTypes = HT_MEM };
     VkBufferCreateInfo bi = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, exportable ? &eb : NULL, .size = n,
         .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
     if (vkCreateBuffer(V.dev, &bi, 0, &r->b)) return 0;
@@ -75,7 +90,7 @@ static int mkbuf(Buf *r, VkDeviceSize n, int host, int exportable) {
     int t = memtype(q.memoryTypeBits, host ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (t < 0) return 0;
     VkMemoryDedicatedAllocateInfo dd = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .buffer = r->b };
-    VkExportMemoryAllocateInfo ex = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, &dd, .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
+    VkExportMemoryAllocateInfo ex = { VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, &dd, .handleTypes = HT_MEM };
     VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, exportable ? &ex : NULL, .allocationSize = q.size, .memoryTypeIndex = t };
     if (vkAllocateMemory(V.dev, &ai, 0, &r->m)) return 0;
     r->n = q.size;
@@ -205,6 +220,9 @@ int rvk_init(const rvk_net *net, int W, int H, const uint8_t *uuid, int mode, in
         if (want ? strstr(p2.properties.deviceName, want) != NULL
                  : (uuid && !zero_uuid) ? !memcmp(idp.deviceUUID, uuid, 16) : p2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) V.pd = pds[i];
     }
+#ifdef _WIN32
+    if (!V.pd && !want && uuid && !zero_uuid) { fail(info, "no Vulkan device matches the GL GPU (UUID)"); return 0; }   // never another GPU (e.g. a Tesla)
+#endif
     if (!V.pd && !want) {
         // Fallback (e.g. WSL2 Dozen where GL UUID differs from Vulkan UUID): pick discrete GPU, or first non-CPU GPU
         for (uint32_t i = 0; i < n && !V.pd; i++) {
@@ -236,8 +254,8 @@ int rvk_init(const rvk_net *net, int W, int H, const uint8_t *uuid, int mode, in
     if (mode == 1) cm = 0;
     if (mode == 2 && !cm) { fail(info, "no matrix cores (16x16x16 fp16) on this GPU"); return 0; }
     info->coopmat = cm; info->acc16 = cm && cml == 2;
-    if (export_gl && !(has_ext("VK_KHR_external_memory_fd") && has_ext("VK_KHR_external_semaphore_fd"))) {
-        fail(info, "no external memory / semaphore fd support"); return 0;
+    if (export_gl && !(has_ext(EXT_MEM) && has_ext(EXT_SEM))) {
+        fail(info, "no " EXT_MEM " / " EXT_SEM); return 0;
     }
     uint32_t nq = 16; VkQueueFamilyProperties qp[16]; vkGetPhysicalDeviceQueueFamilyProperties(V.pd, &nq, qp);
     V.qf = 0; while (V.qf < nq && !(qp[V.qf].queueFlags & VK_QUEUE_COMPUTE_BIT)) V.qf++;
@@ -245,7 +263,7 @@ int rvk_init(const rvk_net *net, int W, int H, const uint8_t *uuid, int mode, in
     float prio = 1;
     VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = V.qf, .queueCount = 1, .pQueuePriorities = &prio };
     const char *ext[4]; int ne = 0;
-    if (export_gl) { ext[ne++] = "VK_KHR_external_memory_fd"; ext[ne++] = "VK_KHR_external_semaphore_fd"; }
+    if (export_gl) { ext[ne++] = EXT_MEM; ext[ne++] = EXT_SEM; }
     if (cm) ext[ne++] = "VK_KHR_cooperative_matrix";
     // enable only what the matrix-core path needs (and only when it is used)
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR ecm = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR, .cooperativeMatrix = 1 };
@@ -259,9 +277,15 @@ int rvk_init(const rvk_net *net, int W, int H, const uint8_t *uuid, int mode, in
     DEV_FUNCS(L)
 #undef L
     if (export_gl) {
+#ifdef _WIN32
+        vkGetMemoryWin32HandleKHR = (void *)vkGetDeviceProcAddr(V.dev, "vkGetMemoryWin32HandleKHR");
+        vkGetSemaphoreWin32HandleKHR = (void *)vkGetDeviceProcAddr(V.dev, "vkGetSemaphoreWin32HandleKHR");
+        if (!vkGetMemoryWin32HandleKHR || !vkGetSemaphoreWin32HandleKHR) { fail(info, "missing win32 export functions"); return 0; }
+#else
         vkGetMemoryFdKHR = (void *)vkGetDeviceProcAddr(V.dev, "vkGetMemoryFdKHR");
         vkGetSemaphoreFdKHR = (void *)vkGetDeviceProcAddr(V.dev, "vkGetSemaphoreFdKHR");
         if (!vkGetMemoryFdKHR || !vkGetSemaphoreFdKHR) { fail(info, "missing fd export functions"); return 0; }
+#endif
     }
     vkGetDeviceQueue(V.dev, V.qf, 0, &V.q);
 
@@ -287,7 +311,7 @@ int rvk_init(const rvk_net *net, int W, int H, const uint8_t *uuid, int mode, in
     CK(vkCreateQueryPool(V.dev, &qpi, 0, &V.qpool), "query pool");
     if (!qp[V.qf].timestampValidBits) V.props.limits.timestampPeriod = 0;   // no autotune: first variant wins
     if (export_gl) {
-        VkExportSemaphoreCreateInfo es = { VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO, .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT };
+        VkExportSemaphoreCreateInfo es = { VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO, .handleTypes = HT_SEM };
         VkSemaphoreCreateInfo sci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &es };
         CK(vkCreateSemaphore(V.dev, &sci, 0, &V.sem_in), "semaphore"); CK(vkCreateSemaphore(V.dev, &sci, 0, &V.sem_out), "semaphore");
     }
@@ -392,12 +416,21 @@ int rvk_init(const rvk_net *net, int W, int H, const uint8_t *uuid, int mode, in
             info->ms = (ts[1] - ts[0]) * V.props.limits.timestampPeriod / 1e6;
     }
     if (export_gl) {
+#ifdef _WIN32
+        VkMemoryGetWin32HandleInfoKHR gi = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR, .memory = V.in.m, .handleType = HT_MEM };
+        CK(vkGetMemoryWin32HandleKHR(V.dev, &gi, (HANDLE *)&info->in_h), "export memory");
+        gi.memory = V.out.m; CK(vkGetMemoryWin32HandleKHR(V.dev, &gi, (HANDLE *)&info->out_h), "export memory");
+        VkSemaphoreGetWin32HandleInfoKHR sg = { VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR, .semaphore = V.sem_in, .handleType = HT_SEM };
+        CK(vkGetSemaphoreWin32HandleKHR(V.dev, &sg, (HANDLE *)&info->sem_in_h), "export semaphore");
+        sg.semaphore = V.sem_out; CK(vkGetSemaphoreWin32HandleKHR(V.dev, &sg, (HANDLE *)&info->sem_out_h), "export semaphore");
+#else
         VkMemoryGetFdInfoKHR gi = { VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = V.in.m, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
         CK(vkGetMemoryFdKHR(V.dev, &gi, &info->in_fd), "export memory");
         gi.memory = V.out.m; CK(vkGetMemoryFdKHR(V.dev, &gi, &info->out_fd), "export memory");
         VkSemaphoreGetFdInfoKHR sg = { VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR, .semaphore = V.sem_in, .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT };
         CK(vkGetSemaphoreFdKHR(V.dev, &sg, &info->sem_in_fd), "export semaphore");
         sg.semaphore = V.sem_out; CK(vkGetSemaphoreFdKHR(V.dev, &sg, &info->sem_out_fd), "export semaphore");
+#endif
     }
     info->ok = 1;
     return 1;

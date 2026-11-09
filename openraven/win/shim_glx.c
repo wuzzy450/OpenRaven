@@ -9,6 +9,16 @@
 #include <string.h>
 
 // ---- resolving real GL functions -----------------------------------------------
+// Like gl_resolve, but NULL instead of FATAL (optional extensions; callers check)
+void *gl_resolve_opt(const char *name) {
+    static HMODULE gl, glu;
+    if (!gl) gl = LoadLibraryA("opengl32.dll");
+    if (!glu) glu = LoadLibraryA("glu32.dll");
+    void *p = (void *)GetProcAddress(gl, name);
+    if (!p) p = (void *)GetProcAddress(glu, name);
+    if (!p) { p = (void *)wglGetProcAddress(name); if ((uintptr_t)p <= 3 || p == (void *)-1) p = NULL; }
+    return p;
+}
 void *gl_resolve(const char *name) {
     static HMODULE gl, glu;
     if (!gl) gl = LoadLibraryA("opengl32.dll");
