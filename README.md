@@ -137,6 +137,6 @@ Prebuilt files are included, so you only need this if you change the code.
 
 ## License
 
-OpenRaven's own code is MIT licensed. Included third-party files keep their own licenses: FSR 2 (MIT), the GCC runtime libraries in `openraven/cabinet_libs/` (GPL with the GCC Runtime Library Exception), and FMOD in `openraven/extralibs/` (FMOD license).
+OpenRaven's own code is MIT licensed. Included third-party files keep their own licenses: FSR 2 (MIT), the GCC runtime libraries in `openraven/cabinet_libs/` (GPL with the GCC Runtime Library Exception), and FMOD in `openraven/extralibs/` (FMOD license). Details for every included binary: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 OpenRaven is an unofficial fan project. It isn't affiliated with or endorsed by Microsoft, 343 Industries, Raw Thrills or Play Mechanix, and it contains no game data.

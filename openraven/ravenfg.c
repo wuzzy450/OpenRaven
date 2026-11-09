@@ -103,11 +103,11 @@ static GLint u_vs, u_A, u_B, u_F, u_V, u_D, u_t, u_kb, u_hasA, u_hasV, u_dbg, u_
 static long frames;
 static double now_s(void);
 static double last_real_t, real_dt = 1.0 / 60, last_swap_t;
-// Adaptive: generated frames only fill refresh slots the game can't. render_t = game's own time per
-// frame (from the real present returning to the next present call); period = screen refresh interval
+// Adaptive: generated frames only fill refresh slots the game can't. The game's own time per frame
+// is measured from the real present returning to the next present call; period = screen refresh interval
 // (shortest swap-to-swap interval seen in the last second). Generating when the game already reaches
 // the refresh rate would only lower its real frame rate, so we don't.
-static double last_real_ret, render_t = 1.0 / 120, period = 1.0 / 60, win_min = 1, win_t0, prev_swap_ret;
+static double last_real_ret, period = 1.0 / 60, win_min = 1, win_t0, prev_swap_ret;
 static int n_use = 1, force_all;
 static double hw_period;   // from XRandR (or REFRESH_RATE in graphics.ini); 0 = unknown
 static void query_refresh(void)

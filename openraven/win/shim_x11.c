@@ -200,6 +200,15 @@ static uint32_t keysym_for(unsigned kc, int shift) {
     return k;
 }
 
+static DWORD WINAPI close_watchdog(void *arg) {
+    (void)arg;
+    Sleep(1500);
+    raven_log("WM_CLOSE: game did not exit, ending the process\n");
+    fflush(NULL);
+    TerminateProcess(GetCurrentProcess(), 0);
+    return 0;
+}
+
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     uint64_t id = id_of(h);
     xwin *w = W(id);
@@ -226,7 +235,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         unsigned char *e = q_new(up ? KeyRelease : KeyPress, id);
         fill_pointer(e, 0, 0);
         SET(e, 84, unsigned, (unsigned)code + 8);
-        if (msg == WM_SYSKEYDOWN && wp == VK_F4) return DefWindowProcA(h, msg, wp, lp);
+        if (msg == WM_SYSKEYDOWN && wp == VK_F4 && !(lp & (1 << 30))) PostMessageA(h, WM_CLOSE, 0, 0);
         return 0;
     }
     case WM_MOUSEMOVE: {
@@ -287,6 +296,13 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SET(e, 40, uint64_t, g_atom_protocols);
         SET(e, 48, int, 32);
         SET(e, 56, uint64_t, g_atom_delete);
+        // The arcade game ignores WM_DELETE_WINDOW, so quit for it if it is still running shortly after.
+        static LONG closing;
+        if (!InterlockedExchange(&closing, 1)) {
+            raven_log("WM_CLOSE: closing the game\n");
+            HANDLE t = CreateThread(NULL, 0, close_watchdog, NULL, 0, NULL);
+            if (t) CloseHandle(t); else close_watchdog(NULL);
+        }
         return 0;
     }
     }
