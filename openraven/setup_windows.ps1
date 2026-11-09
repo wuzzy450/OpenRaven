@@ -180,10 +180,10 @@ try {
             if (-not (Have-Data)) { Say 'Still needed: your game archive (the one with the pm\g7\halo\data folder).' Yellow }
             if (-not (Have-Dec)) {
                 if ($script:DataOnlyPack) {
-                    Say "Still needed: the v3.11 game program (game + halo.so). '$($script:DataOnlyPack)' has the game data but not these two files; the v3.11 .7z pack never has halo.so." Yellow
-                    Say 'Pick the archive that has them, for example the [TP] release zip, or a zip with just the two files.' Yellow
+                    Say "Got the game data from '$($script:DataOnlyPack)'. Still needed: the decrypted v3.11 game program (game + halo.so)." Yellow
+                    Say 'Game archives never contain it; it comes as a separate small pack (usually 3.11-dec.zip, about 11 MB). Pick that file.' Yellow
                 } else {
-                    Say 'Still needed: the v3.11 game program files (game + halo.so). None of the archives checked had them.' Yellow
+                    Say 'Still needed: the decrypted v3.11 game program (game + halo.so, usually 3.11-dec.zip, about 11 MB). None of the archives checked had it.' Yellow
                 }
             }
             $picked = Pick-Archives
@@ -199,6 +199,7 @@ try {
 
     Say 'Starting the game. F1 = settings overlay. Log: ravenloader.log in the game folder.' Green
     $ErrorActionPreference = 'Continue'   # the game writes to the console; that is not an error
+    Set-Location -LiteralPath $Root       # ravenloader.log goes to the game folder
     & (Join-Path $Win 'ravenloader.exe') $Root
     if ($LASTEXITCODE -eq 0) { Offer-Shortcut }
     exit 0

@@ -196,7 +196,8 @@ int main(int argc, char **argv) {
         GetModuleFileNameA(NULL, exe_root, MAX_PATH);
         for (int up = 0; up < 3; up++) { char *s = strrchr(exe_root, '\\'); if (s) *s = 0; }
         SetCurrentDirectoryA(exe_root);   // ravenloader.log etc. land in the game folder as usual
-    }
+    } else
+        SetCurrentDirectoryA(argv[1]);    // same when the launcher passes the game folder (drag-and-drop runs start elsewhere)
     raven_set_root(argc > 1 ? argv[1] : exe_root);
     shim_core_init();
     g_canary_slot = TlsAlloc();

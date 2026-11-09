@@ -8,13 +8,17 @@
 
 *Halo: Fireteam Raven* (Raw Thrills / Play Mechanix / 343 Industries, 2018) is a four-player arcade rail shooter that only ever ran on arcade cabinets. OpenRaven runs the original v3.11 cabinet game on a normal PC with a controller or keyboard, in any resolution, with modern graphics options on top.
 
-> **You need your own copy of the game.** No game files are included here. OpenRaven works with the usual v3.11 game archive (for example `Halo Fireteam Raven (3.11)(2018)[Raw Thrills].zip`, as `.zip`, `.7z` or `.rar`).
+> **You need your own copy of the game.** No game files are included here. You need two things, as `.zip`, `.7z` or `.rar`:
+> 1. **The v3.11 game archive** with the game data (for example `Halo Fireteam Raven (3.11)(2018)[Raw Thrills].zip`, about 6 GB).
+> 2. **The decrypted v3.11 game program** (`game` + `halo.so`, usually `3.11-dec.zip`, about 11 MB). The game archive never contains it.
+>
+> Setup recognises both by their contents, so file names and folder layout don't matter.
 
 ---
 
 ## What you get
 
-- **One-click setup.** Point it at your game archive once, and it unpacks everything and starts the game. After that it starts straight away.
+- **One-click setup.** Point it at your game archives once, and it unpacks everything and starts the game. After that it starts straight away.
 - **Native on Windows.** Runs the game directly on your graphics driver. No WSL, no virtual machine, no emulator.
 - **Controllers and keyboard.** Up to 4 Xbox-style controllers (one per player), plus keyboard controls.
 - **Arcade quirks handled.** Free Play on, boot checks and gun calibration skipped, straight to the title screen in about 10 seconds. Muted cabinet audio fixed.
@@ -38,7 +42,7 @@ Out of the box it uses maximum quality, native resolution, and FSR 2 as anti-ali
 
 1. Download **`OpenRaven.zip`** from the [latest release](https://github.com/wuzzy450/OpenRaven/releases/latest) and unzip it anywhere (right-click → Extract All).
 2. Double-click **`start_windows.bat`**.
-3. **First run only:** it looks for your game archive in the OpenRaven folder, the folder above it, Downloads and Desktop. If it can't find it, a window opens so you can pick it. Unpacking takes a few minutes.
+3. **First run only:** it looks for your two archives in the OpenRaven folder, the folder above it, Downloads and Desktop. If it can't find one, a window opens so you can pick it (you can select both at once). Unpacking takes a few minutes. You can also drag both archives onto `start_windows.bat`.
 4. The game starts fullscreen. Next time, double-clicking `start_windows.bat` starts it straight away.
 
 To quit, press **Alt+F4**. If something goes wrong, share `ravenloader.log` from the OpenRaven folder on the [Discord](https://discord.gg/nuvpXycag8).
@@ -53,7 +57,7 @@ cd OpenRaven
 ./start_linux.sh
 ```
 
-The first run installs what it needs (asking for your password), finds your game archive or asks for it, unpacks it and starts the game. You can also give it the archive directly: `./start_linux.sh /path/to/game.zip`.
+The first run installs what it needs (asking for your password), finds your two archives (game data + `3.11-dec` program pack) or asks for them, unpacks them and starts the game. You can also give them directly: `./start_linux.sh /path/to/game.zip /path/to/3.11-dec.zip`.
 
 To force-close the game (arcade games have no quit button): `./openraven/stop_halo.sh`
 
