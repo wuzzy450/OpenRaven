@@ -70,7 +70,7 @@ static item_t items[] = {
  {"Shadows","Stable shadows","ENABLE_STABLE_SHADOW",T_CHOICE,0,"0|1",0,0,0,"0","Less shimmering"},
  {"Effects","SSAO","ENABLE_SSAO",T_CHOICE,0,"0|1",0,0,0,"1","Ambient occlusion"},
  {"Effects","Reflections resolution","SSR_BUFFER_SCALE",T_CHOICE,0,"0.25|0.5|0.75|1.0",0,0,0,"0.5",NULL},
- {"Effects","Enhanced bloom","ENHANCED_BLOOM",T_CHOICE,0,"0|1",0,0,0,"0","Engine bug: some menus turn white. Leave off"},
+// Enhanced bloom removed from the menu for now: engine bug turns some scenes white (ENHANCED_BLOOM stays 0 in graphics.ini)
  {"Effects","Bloom strength","bloomscale",T_NUM,1,NULL,0,3,0.1f,"1","Live"},
  {"Effects","Glow strength","glowscale",T_NUM,1,NULL,0,3,0.1f,"1","Live"},
  {"Effects","Lens flare","ENABLE_LENS_FLARE",T_CHOICE,0,"0|1",0,0,0,"0",NULL},
