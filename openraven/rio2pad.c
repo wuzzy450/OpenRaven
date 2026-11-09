@@ -91,6 +91,12 @@ static float g_aim[MAX_PADS][2];   // per-player aim point, 0..1 across the scre
 int rio2pad_aim_mode;               // exported: the overlay (ravenui.c) changes it live
 float rio2pad_stick_speed = 0.25f;  // RIO2PAD_STICKSPEED; also changed live by the overlay
 #define g_aim_mode rio2pad_aim_mode
+// Mouse drives player 1: 0 off, 1 screen (pointer position = aim), 2 relative (pointer kept at the
+// window centre, movement pushes the aim). RIO2PAD_MOUSE / RIO2PAD_MOUSESENS; overlay changes them live.
+int rio2pad_mouse_mode = 1;
+float rio2pad_mouse_sens = 1.0f;
+static int g_mouse_owns;           // mouse moved last: it has player 1's aim
+static volatile int g_mouse_btn[3]; // left fire, middle grenade, right reload
 
 // Always report the guns as present (aim stays centred until that player's pad moves it), so the
 // game never shows "gun missing" while a wireless pad is asleep.
@@ -152,7 +158,8 @@ static int in_continue(int p)
 static int trigger_pressed(int p)
 {
     static int block[MAX_PADS];
-    int down = g_pads[p].fd != -1 && (g_pads[p].axis[5] > 0 || (g_pads[p].fd == -2 && g_pads[p].axis[5] > -16000 && g_pads[p].axis[5] != 0));
+    int down = (g_pads[p].fd != -1 && (g_pads[p].axis[5] > 0 || (g_pads[p].fd == -2 && g_pads[p].axis[5] > -16000 && g_pads[p].axis[5] != 0)))
+               || (p == 0 && g_mouse_btn[0]);   // left click
     if (getenv("RIO2PAD_CONTINUESHOOT")) return down;
     if (in_continue(p)) { block[p] = 1; return 0; }
     if (block[p] && down) return 0;   // still held from the countdown
@@ -196,8 +203,9 @@ static void *sw_get_hook(int id)
         int p = (id - 793) / 5, k = (id - 793) % 5;
         pressed = 0;
         if (k == 2) pressed = trigger_pressed(p);                                       // RT
-        if (k == 3) pressed = btn(p, PAD_RB);                                           // RB = reload
-        if (k == 4) pressed = g_pads[p].fd != -1 && (g_pads[p].axis[2] > 0 || (g_pads[p].fd == -2 && g_pads[p].axis[2] > -16000 && g_pads[p].axis[2] != 0)); // LT = grenade
+        if (k == 3) pressed = btn(p, PAD_RB) || (p == 0 && g_mouse_btn[2]);            // RB / right click = reload
+        if (k == 4) pressed = (g_pads[p].fd != -1 && (g_pads[p].axis[2] > 0 || (g_pads[p].fd == -2 && g_pads[p].axis[2] > -16000 && g_pads[p].axis[2] != 0)))
+                              || (p == 0 && g_mouse_btn[1]);   // LT / middle click = grenade
     }
     // Player START in the gun cabinet: the type-8 remap sends 581 -> logical 0x24e and 582 -> 0x251,
     // and the game reads "Player N Start" as logical 0x24e + slot (gun 2 is slot 3). Same switch
@@ -274,6 +282,10 @@ static void update_aim(void)
         float sx = g_pads[p].axis[3] / 32767.0f, sy = g_pads[p].axis[4] / 32767.0f;   // right stick (or left stick if larger)
         float lx = g_pads[p].axis[0] / 32767.0f, ly = g_pads[p].axis[1] / 32767.0f;
         if (lx * lx + ly * ly > sx * sx + sy * sy) { sx = lx; sy = ly; }
+        if (p == 0 && g_mouse_owns) {           // mouse keeps P1's aim until a stick is pushed
+            if (sx * sx + sy * sy < 0.3f * 0.3f) continue;
+            g_mouse_owns = 0;
+        }
         if (g_aim_mode) {                       // absolute: centre of stick = centre of screen
             g_aim[p][0] = 0.5f + 0.5f * sx;
             g_aim[p][1] = 0.5f + 0.5f * sy;
@@ -406,6 +418,105 @@ static void scan_pads(void)
     }
 }
 
+// ---- mouse, through our own X11 connection (libX11 loaded at run time) ----
+typedef unsigned long XID_;
+static struct {
+    void *dpy;
+    void *(*open)(const char *);
+    int (*focus)(void *, XID_ *, int *);
+    int (*query)(void *, XID_, XID_ *, XID_ *, int *, int *, int *, int *, unsigned *);
+    int (*geom)(void *, XID_, XID_ *, int *, int *, unsigned *, unsigned *, unsigned *, unsigned *);
+    int (*warp)(void *, XID_, XID_, int, int, unsigned, unsigned, int, int);
+    int (*flush)(void *);
+    XID_ (*atom)(void *, const char *, int);
+    int (*prop)(void *, XID_, XID_, long, long, int, XID_, XID_ *, int *, unsigned long *, unsigned long *, unsigned char **);
+    int (*xfree)(void *);
+    int (*tree)(void *, XID_, XID_ *, XID_ *, XID_ **, unsigned *);
+} X;
+
+static int x_init(void)
+{
+    static int tried;
+    if (X.dpy || tried) return X.dpy != NULL;
+    tried = 1;
+    void *h = dlopen("libX11.so.6", RTLD_NOW | RTLD_LOCAL);
+    if (!h) { fprintf(stderr, "[rio2pad] mouse: no libX11, mouse off\n"); return 0; }
+    X.open = dlsym(h, "XOpenDisplay");          X.focus = dlsym(h, "XGetInputFocus");
+    X.query = dlsym(h, "XQueryPointer");        X.geom = dlsym(h, "XGetGeometry");
+    X.warp = dlsym(h, "XWarpPointer");          X.flush = dlsym(h, "XFlush");
+    X.atom = dlsym(h, "XInternAtom");           X.prop = dlsym(h, "XGetWindowProperty");
+    X.xfree = dlsym(h, "XFree");                X.tree = dlsym(h, "XQueryTree");
+    if (!X.open || !X.focus || !X.query || !X.geom || !X.warp || !X.flush || !X.atom || !X.prop || !X.xfree || !X.tree) return 0;
+    X.dpy = X.open(NULL);
+    fprintf(stderr, "[rio2pad] mouse: %s\n", X.dpy ? "X11 connected" : "XOpenDisplay failed, mouse off");
+    return X.dpy != NULL;
+}
+
+// Is window w (or one of its parents) a window of this process? (_NET_WM_PID; cached for the last window)
+static int x_ours(XID_ w)
+{
+    static XID_ last; static int last_ok;
+    if (w == last) return last_ok;
+    last = w; last_ok = 0;
+    XID_ pid_atom = X.atom(X.dpy, "_NET_WM_PID", 0), cur = w;
+    for (int depth = 0; cur && depth < 8; depth++) {
+        XID_ type, root, parent, *kids = NULL; int fmt; unsigned long n, after; unsigned char *data = NULL; unsigned nk;
+        if (X.prop(X.dpy, cur, pid_atom, 0, 1, 0, 0 /*AnyPropertyType*/, &type, &fmt, &n, &after, &data) == 0 && data) {
+            if (n == 1 && fmt == 32) last_ok = (pid_t)*(unsigned long *)data == getpid();
+            X.xfree(data);
+            if (n == 1) return last_ok;
+        }
+        if (!X.tree(X.dpy, cur, &root, &parent, &kids, &nk)) break;
+        if (kids) X.xfree(kids);
+        if (parent == root) break;
+        cur = parent;
+    }
+    return last_ok;
+}
+
+static void poll_mouse(void)
+{
+    static int have_last, lx, ly;
+    g_mouse_btn[0] = g_mouse_btn[1] = g_mouse_btn[2] = 0;
+    static int (*ui_is_open)(void); static int ui_looked;
+    if (!ui_looked) { ui_looked = 1; ui_is_open = (int (*)(void))dlsym(RTLD_DEFAULT, "ravenui_is_open"); }
+    if (!rio2pad_mouse_mode || !x_init() || (ui_is_open && ui_is_open())) { have_last = 0; return; }
+    XID_ w; int rev;
+    X.focus(X.dpy, &w, &rev);
+    if (w <= 1 /*None, PointerRoot*/ || !x_ours(w)) { have_last = 0; return; }
+    XID_ root, child; int rx, ry, wx, wy, gx, gy; unsigned mask, ww, wh, bw, dep;
+    if (!X.geom(X.dpy, w, &root, &gx, &gy, &ww, &wh, &bw, &dep) || !ww || !wh) return;
+    if (!X.query(X.dpy, w, &root, &child, &rx, &ry, &wx, &wy, &mask)) { have_last = 0; return; }   // other screen
+    int inside = wx >= 0 && wy >= 0 && wx < (int)ww && wy < (int)wh;
+    if (rio2pad_mouse_mode == 1) {
+        if (have_last && (wx != lx || wy != ly) && inside) {
+            g_mouse_owns = 1;
+            g_aim[0][0] = (wx + 0.5f) / ww;
+            g_aim[0][1] = (wy + 0.5f) / wh;
+        }
+        lx = wx; ly = wy; have_last = 1;
+    } else {
+        int mx = ww / 2, my = wh / 2;
+        if (have_last && (wx != mx || wy != my)) {
+            g_mouse_owns = 1;
+            g_aim[0][0] += (float)(wx - mx) / ww * rio2pad_mouse_sens;
+            g_aim[0][1] += (float)(wy - my) / wh * rio2pad_mouse_sens;
+            for (int k = 0; k < 2; k++) {
+                if (g_aim[0][k] < 0) g_aim[0][k] = 0;
+                if (g_aim[0][k] > 1) g_aim[0][k] = 1;
+            }
+        }
+        X.warp(X.dpy, 0, w, 0, 0, 0, 0, mx, my);
+        X.flush(X.dpy);
+        have_last = 1; inside = 1;
+    }
+    if (inside) {
+        g_mouse_btn[0] = !!(mask & (1u << 8));    // Button1Mask
+        g_mouse_btn[1] = !!(mask & (1u << 9));    // Button2Mask (middle)
+        g_mouse_btn[2] = !!(mask & (1u << 10));   // Button3Mask (right)
+    }
+}
+
 static void dump_swlog(void)
 {
     FILE *f = fopen(g_swlog, "w");
@@ -444,6 +555,7 @@ static void *pad_thread(void *arg)
         int np = 0, map[MAX_PADS];
         for (int p = 0; p < MAX_PADS; p++)
             if (g_pads[p].fd >= 0) { pfd[np].fd = g_pads[p].fd; pfd[np].events = POLLIN; map[np++] = p; }
+        poll_mouse();
         update_aim();
         if (poll(pfd, np, 4) <= 0) continue;
 
@@ -609,6 +721,11 @@ __attribute__((constructor)) static void rio2pad_init(void)
     for (int p = 0; p < MAX_PADS; p++) g_aim[p][0] = g_aim[p][1] = 0.5f;
     if (getenv("RIO2PAD_STICKSPEED")) rio2pad_stick_speed = strtof(getenv("RIO2PAD_STICKSPEED"), NULL);
     g_aim_mode = getenv("RIO2PAD_AIM") && !strcmp(getenv("RIO2PAD_AIM"), "abs");
+    if (getenv("RIO2PAD_MOUSE")) {
+        const char *m = getenv("RIO2PAD_MOUSE");
+        rio2pad_mouse_mode = !strcmp(m, "relative") ? 2 : (!strcmp(m, "0") || !strcmp(m, "off")) ? 0 : 1;
+    }
+    if (getenv("RIO2PAD_MOUSESENS")) rio2pad_mouse_sens = strtof(getenv("RIO2PAD_MOUSESENS"), NULL);
     mprotect((void *)(IRT_GUN_CONNECTED & ~0xfffUL), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
     mprotect((void *)(IRT_GUN_AIM & ~0xfffUL), 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
     if (*(unsigned char *)IRT_GUN_CONNECTED == 0xe9 && *(unsigned char *)IRT_GUN_AIM == 0x48) {

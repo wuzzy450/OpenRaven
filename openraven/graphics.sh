@@ -19,6 +19,8 @@ done
 export HALO_VOLUME="${HALO_VOLUME:-$(gfx volume 100%)}"
 [ -z "$RIO2PAD_AIM" ] && [ "$(gfx aim cursor)" = abs ] && export RIO2PAD_AIM=abs
 [ -z "$RIO2PAD_STICKSPEED" ] && export RIO2PAD_STICKSPEED="$(gfx stick_speed 0.25)"
+[ -z "$RIO2PAD_MOUSE" ] && export RIO2PAD_MOUSE="$(gfx mouse screen)"
+[ -z "$RIO2PAD_MOUSESENS" ] && export RIO2PAD_MOUSESENS="$(gfx mouse_sens 1.0)"
 [ -z "$RIO2PAD_FREEPLAY" ] && [ "$(gfx free_play 1)" = 0 ] && export RIO2PAD_FREEPLAY=0
 [ -z "$RIO2PAD_SKIPBOOT" ] && export RIO2PAD_SKIPBOOT="$(gfx skip_boot 1)"
 for v in RAVENGFX_UISCRIPT RAVENGFX_UIKEY RAVENGFX_NOUI; do

@@ -61,16 +61,21 @@ To force-close the game (arcade games have no quit button): `./openraven/stop_ha
 
 Each controller is one player (controller 1 = player 1, and so on).
 
-| Action | Controller | Keyboard |
+| Action | Controller | Keyboard and mouse |
 |---|---|---|
-| Aim | Right or left stick | Arrow keys |
-| Fire / select | RT | Space |
-| Reload | RB *(or shoot off-screen)* | R |
-| Grenade | LT | G |
-| Start / join / skip cutscene | Start | Enter or 1 |
+| Aim | Right or left stick | Mouse, or arrow keys |
+| Fire / select | RT | Left click, or Space |
+| Reload | RB *(or shoot off-screen)* | Right click, or R |
+| Grenade | LT | Middle click, or G |
+| Start / join / skip cutscene | Start | Enter or 1 (player 2: 2) |
 | Operator menu (TEST) | Back / View | F2 |
-| Insert coin *(not needed with Free Play)* | Y | – |
+| Insert coin *(not needed with Free Play)* | Y | 5 (player 2: 6) |
 | Settings menu | – | **F1** |
+
+The mouse and keyboard play as player 1, next to controller 1. The mouse takes over the aim when you
+move it and gives it back when you push a stick. In the F1 menu (Input), **Mouse aim** picks
+`screen` (the crosshair follows the pointer, like the cabinet's light gun; the default), `relative`
+(the mouse pushes the crosshair, with **Mouse sensitivity**) or off.
 
 ---
 

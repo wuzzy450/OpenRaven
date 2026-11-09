@@ -302,6 +302,99 @@ static void dispatch(void)
     dispatched = true;
 }
 
+// ---- colour guard ----
+// The FSR 2 GL path sometimes (stretches of 100-300 frames, depending on the scene) writes its output with
+// the negative YCoCg chroma clipped to 0: bluish / purple turn grey, reds turn orange. Its input is fine
+// and the engine's TAA is fine (attract scene with Lang and Ramos flickered dull <-> vivid). Not found
+// inside FSR yet (not history, FP16, sharpening, exposure, deringing, motion vectors, unit leaks).
+// So every frame two 16x9 thumbnails (FSR input,
+// FSR output) are read back asynchronously; when the output has lost most of the input's colour the
+// tonemap shows the engine's TAA result (it then runs too) until FSR is right again for 300 frames (it tends to relapse). RAVENFSR_GUARD=0 turns it off.
+static int guard = -1;
+static bool fsr_bad;
+static int taa_hold;                   // frames the engine TAA keeps running after a bad stretch
+static GLuint in_tex;                  // FSR colour input this frame
+static bool guard_on(void)
+{
+    if (guard < 0) { const char *e = getenv("RAVENFSR_GUARD"); guard = !(e && *e == '0'); }
+    return guard > 0;
+}
+static void guard_check(void)
+{
+    if (!guard_on() || !dispatched || !out_tex || !in_tex) return;
+    typedef void (*gen_t)(GLsizei, GLuint *); typedef void (*bind_t)(GLenum, GLuint);
+    static gen_t gfb, grb, gbuf; static bind_t bfb, brb, bbuf;
+    static void (*rbs)(GLenum, GLenum, GLsizei, GLsizei), (*fbrb)(GLenum, GLenum, GLenum, GLuint);
+    static void (*fbt)(GLenum, GLenum, GLenum, GLuint, GLint), (*bdata)(GLenum, long long, const void *, GLenum);
+    static void (*blit)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+    static void (*rp)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);
+    static void *(*mapr)(GLenum, long long, long long, GLbitfield); static unsigned char (*unmap)(GLenum);
+    static unsigned char (*isen)(GLenum); static void (*en)(GLenum), (*dis)(GLenum);
+    static void (*gPixelStorei)(GLenum, GLint);
+    typedef struct __GLsync *sync_t;
+    static sync_t (*fence)(GLenum, GLbitfield); static GLenum (*cws)(sync_t, GLbitfield, unsigned long long); static void (*delsync)(sync_t);
+    static sync_t fs[2];
+    static GLuint fb[2], rb, pbo[2]; static int slot, filled[2], good;
+    if (!fb[0]) {
+        gfb = (gen_t)gpa("glGenFramebuffers"); grb = (gen_t)gpa("glGenRenderbuffers"); gbuf = (gen_t)gpa("glGenBuffers");
+        bfb = (bind_t)gpa("glBindFramebuffer"); brb = (bind_t)gpa("glBindRenderbuffer"); bbuf = (bind_t)gpa("glBindBuffer");
+        rbs = (decltype(rbs))gpa("glRenderbufferStorage"); fbrb = (decltype(fbrb))gpa("glFramebufferRenderbuffer");
+        fbt = (decltype(fbt))gpa("glFramebufferTexture2D"); bdata = (decltype(bdata))gpa("glBufferData");
+        blit = (decltype(blit))gpa("glBlitFramebuffer"); rp = (decltype(rp))gpa("glReadPixels");
+        mapr = (decltype(mapr))gpa("glMapBufferRange"); unmap = (decltype(unmap))gpa("glUnmapBuffer");
+        gPixelStorei = (decltype(gPixelStorei))gpa("glPixelStorei");
+        fence = (decltype(fence))gpa("glFenceSync"); cws = (decltype(cws))gpa("glClientWaitSync"); delsync = (decltype(delsync))gpa("glDeleteSync");
+        if (!fence || !cws || !delsync) { guard = 0; return; }
+        isen = (decltype(isen))gpa("glIsEnabled"); en = (decltype(en))gpa("glEnable"); dis = (decltype(dis))gpa("glDisable");
+        if (!gfb || !grb || !gbuf || !mapr || !blit) { guard = 0; return; }
+        gfb(2, fb); grb(1, &rb); gbuf(2, pbo);
+        brb(0x8D41, rb); rbs(0x8D41, 0x881A, 32, 9); brb(0x8D41, 0);
+        GLint df0; gGetIntegerv(0x8CA6, &df0);
+        bfb(0x8CA9, fb[1]); fbrb(0x8CA9, 0x8CE0, 0x8D41, rb); bfb(0x8CA9, df0);
+        GLint pb0; gGetIntegerv(0x88ED, &pb0);
+        for (int i = 0; i < 2; i++) { bbuf(0x88EB, pbo[i]); bdata(0x88EB, 32 * 9 * 16, nullptr, 0x88E1 /*STREAM_READ*/); }
+        bbuf(0x88EB, pb0);
+    }
+    GLint rf, df, pb, align; gGetIntegerv(0x8CAA, &rf); gGetIntegerv(0x8CA6, &df); gGetIntegerv(0x88ED, &pb); gGetIntegerv(0x0D05, &align);
+    unsigned char sc = isen(0x0C11), srgb = isen(0x8DB9);
+    if (sc) dis(0x0C11); if (srgb) dis(0x8DB9);
+    // 1) result of the readback from two frames ago, only once the GPU is done with it (never wait)
+    int s = slot;
+    if (filled[s] && cws(fs[s], 0, 0) == 0x911B /*TIMEOUT_EXPIRED*/) { bfb(0x8CA8, rf); bfb(0x8CA9, df); if (sc) en(0x0C11); if (srgb) en(0x8DB9); return; }
+    if (filled[s]) {
+        delsync(fs[s]); fs[s] = nullptr;
+        bbuf(0x88EB, pbo[s]);
+        const float *px = (const float *)mapr(0x88EB, 0, 32 * 9 * 16, 0x0001 /*READ*/);
+        if (px) {
+            double sat[2] = {0, 0};
+            for (int y = 0; y < 9; y++) for (int x = 0; x < 32; x++) {
+                const float *c = px + (y * 32 + x) * 4;
+                sat[x >= 16] += fmaxf(c[0], fmaxf(c[1], c[2])) - fminf(c[0], fminf(c[1], c[2]));
+            }
+            unmap(0x88EB);
+            double si = sat[0] / 144, so = sat[1] / 144;
+            bool bad_now = si > 6.0 / 255 && so < 0.6 * si;
+            if (bad_now) taa_hold = 1800;
+            if (bad_now) { if (!fsr_bad) fprintf(stderr, "[ravenfsr] guard: FSR output lost its colour (%.3f vs input %.3f), showing TAA\n", so, si); fsr_bad = true; good = 0; }
+            else if (fsr_bad && ++good >= 300) { fsr_bad = false; fprintf(stderr, "[ravenfsr] guard: FSR output fine again\n"); }
+        }
+        filled[s] = 0;
+    }
+    // 2) this frame's thumbnails -> PBO (read two frames later)
+    int w, h;
+    bfb(0x8CA9, fb[1]);
+    bfb(0x8CA8, fb[0]); texfmt(in_tex, &w, &h); fbt(0x8CA8, 0x8CE0, 0x0DE1, in_tex, 0); blit(0, 0, w, h, 0, 0, 16, 9, 0x4000, 0x2601);
+    texfmt(out_tex, &w, &h); fbt(0x8CA8, 0x8CE0, 0x0DE1, out_tex, 0); blit(0, 0, w, h, 16, 0, 32, 9, 0x4000, 0x2601);
+    fbt(0x8CA8, 0x8CE0, 0x0DE1, 0, 0);
+    bfb(0x8CA8, fb[1]); bbuf(0x88EB, pbo[s]); gPixelStorei(0x0D05, 4);
+    rp(0, 0, 32, 9, 0x1908, 0x1406, nullptr);
+    fs[s] = fence(0x9117 /*SYNC_GPU_COMMANDS_COMPLETE*/, 0);
+    filled[s] = 1; slot = s ^ 1;
+    gPixelStorei(0x0D05, align); bbuf(0x88EB, pb);
+    bfb(0x8CA8, rf); bfb(0x8CA9, df);
+    if (sc) en(0x0C11); if (srgb) en(0x8DB9);
+}
+
 // Returns 1 if the engine's draw call must be skipped.
 extern "C" int ravenfsr_draw(void)
 {
@@ -311,18 +404,21 @@ extern "C" int ravenfsr_draw(void)
         GLint tex = 0; void (*q)(GLuint, GLenum, GLenum, GLint *) = (void (*)(GLuint, GLenum, GLenum, GLint *))gpa("glGetNamedFramebufferAttachmentParameteriv");
         if (fbo && q) q(fbo, 0x8CE0, 0x8CD1, &tex);
         taa_out_tex = tex;
+        in_tex = ravengl_unit_tex(0);
         dispatch();
         if (!dispatched) return 0;   // FSR failed: let the engine's TAA run
     }
-    return 1;
+    // guard: the engine's TAA also runs while FSR is bad and for a while after (it relapses), so the
+    // fallback picture is ready; its neighbourhood clamp keeps the first frame after a pause clean.
+    return guard_on() && (fsr_bad || taa_hold > 0) ? 0 : 1;
 }
 
-// Tonemap reads the TAA result: give it the FSR output instead.
+// Tonemap reads the TAA result: give it the FSR output instead (unless the guard caught a bad FSR frame).
 extern "C" GLuint ravenfsr_bind_texture(GLuint tex)
 {
-    if (dispatched && cur && cur->kind == K_TONE && tex && tex == taa_out_tex && out_tex) return out_tex;
+    if (dispatched && !fsr_bad && cur && cur->kind == K_TONE && tex && tex == taa_out_tex && out_tex) return out_tex;
     return tex;
 }
 
 extern "C" int ravenfsr_dispatched(void) { return dispatched; }   // debug: FSR ran this frame
-extern "C" void ravenfsr_frame_end(void) { dispatched = false; have_jit = false; have_mvp = have_nj = false; }
+extern "C" void ravenfsr_frame_end(void) { guard_check(); if (taa_hold > 0) taa_hold--; dispatched = false; have_jit = false; have_mvp = have_nj = false; }

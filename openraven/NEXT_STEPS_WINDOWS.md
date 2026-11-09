@@ -265,6 +265,30 @@ accumulate autotune per layer + `NEURAL_ACCUMULATE = auto|fp16|fp32` (PR #4; the
 gpu-unlock tool, so fp32 is as fast there), Enhanced bloom removed from F1 (PR #5), Linux ravengfx.so
 rebuilt in WSL (PR #6, GLIBC 2.38, not run in game on Linux yet).
 
+### Done 2026-11-09: tasks A, B, C below (not committed yet when written)
+- **A. Mouse:** `rio2pad_win.c` / `rio2pad.c` (Linux: own X11 connection, libX11 dlopen'd, window checked by
+  `_NET_WM_PID`). Player 1: `mouse = screen` (default; pointer = aim) | `relative` (pointer kept centred,
+  `mouse_sens`) | `0`. Left fire, right reload, middle grenade. Mouse owns the aim after it moves, a stick
+  push takes it back. Off while F1 is open (`ravenui_is_open`). F1 Input items + graphics.ini keys
+  `mouse`, `mouse_sens` (env `RIO2PAD_MOUSE`, `RIO2PAD_MOUSESENS`). Windows checked by script (aim follows
+  SetCursorPos exactly); Linux built only. README controls table updated.
+- **B. HUD line above Ramos/Lang (engine bug, plain game too):** the portraits are DXT5 sprites (700x300)
+  left on GL_REPEAT; bottom row opaque -> quad top edge bleeds it in. `gl_hooks.c`: textures with an
+  alpha format get CLAMP_TO_EDGE right after upload unless the engine set a wrap first;
+  glDeleteTextures resets the per-name flags (names are reused per scene). `RAVEN_SPRITECLAMP=0` = off.
+  Checked by script on 2-minute attract runs and gameplay (no line at row 1615).
+- **C. Lang/Ramos attract scene dull <-> vivid: OUR bug, FSR 2 only.** FSR 2's output sometimes (stretches
+  of 100-300 frames) has negative YCoCg chroma clipped to 0 (blue/purple -> grey, red -> orange) although
+  its prepared input is right. Ruled out: history/reset, FP16, sharpening, exposure, deringing, motion
+  vectors, unit leaks, barriers, output format, local contrast. Happens much more under load (per-frame
+  captures). Fix = colour guard in `ravenfsr.cpp`: async (fenced PBO) 16x9 thumbnails of FSR in/out each
+  frame; when the output lost the colour, the tonemap shows the engine's TAA (which then also runs, for
+  1800 frames) until FSR is fine for 300 frames. `RAVENFSR_GUARD=0` = off. No FPS cost measured. User
+  confirmed no flicker. Root cause inside the FSR GL port still open (likely a GPU sync race: with the
+  guard's extra GL work the bug did not even trigger).
+- Black flicker on wipes seen during the test runs: caused by the per-frame debug captures (stalls), not a
+  regression; the 1 px compose window is unchanged.
+
 ### New tasks from the user (2026-11-08), do these first
 
 A. **Mouse controls, Windows and Linux: mouse moves the aim, left click fires.**

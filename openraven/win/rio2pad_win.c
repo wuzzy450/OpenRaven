@@ -69,6 +69,12 @@ static adj_get_fn adj_get_orig;
 static float g_aim[MAX_PADS][2];
 int rio2pad_aim_mode;
 float rio2pad_stick_speed = 0.25f;
+// Mouse drives player 1: 0 off, 1 screen (cursor position = aim, like a light gun),
+// 2 relative (mouse moves the aim, cursor kept in the window centre). Sens only for relative.
+int rio2pad_mouse_mode = 1;
+float rio2pad_mouse_sens = 1.0f;
+static int g_mouse_owns;          // 1 = mouse moved last, so it drives P1's aim
+static int g_mouse_btn[3];        // left fire, right reload, middle grenade
 
 static long long now_ms(void) { return (long long)GetTickCount64(); }
 
@@ -321,6 +327,56 @@ static int our_window_focused(void)
 
 static int key(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
+HWND raven_game_hwnd(void);
+int ravenui_is_open(void);
+
+// Mouse -> player 1 aim/buttons. Runs on the pad thread.
+static void poll_mouse(void)
+{
+    static POINT last; static int have_last;
+    g_mouse_btn[0] = g_mouse_btn[1] = g_mouse_btn[2] = 0;
+    HWND gw = raven_game_hwnd();
+    if (!rio2pad_mouse_mode || !gw || !our_window_focused() || ravenui_is_open()) { have_last = 0; return; }
+    RECT rc; POINT p;
+    if (!GetClientRect(gw, &rc) || rc.right <= 0 || rc.bottom <= 0 || !GetCursorPos(&p)) return;
+    POINT c = p;
+    ScreenToClient(gw, &c);
+    int inside = c.x >= 0 && c.y >= 0 && c.x < rc.right && c.y < rc.bottom;
+    if (rio2pad_mouse_mode == 1) {
+        if (have_last && (p.x != last.x || p.y != last.y) && inside) {
+            g_mouse_owns = 1;
+            g_aim[0][0] = (c.x + 0.5f) / rc.right;
+            g_aim[0][1] = (c.y + 0.5f) / rc.bottom;
+        }
+        last = p; have_last = 1;
+    } else {
+        POINT mid = {rc.right / 2, rc.bottom / 2};
+        ClientToScreen(gw, &mid);
+        if (have_last && (p.x != mid.x || p.y != mid.y)) {
+            g_mouse_owns = 1;
+            for (int k = 0; k < 2; k++) {
+                float d = k ? (float)(p.y - mid.y) / rc.bottom : (float)(p.x - mid.x) / rc.right;
+                g_aim[0][k] += d * rio2pad_mouse_sens;
+                if (g_aim[0][k] < 0) g_aim[0][k] = 0;
+                if (g_aim[0][k] > 1) g_aim[0][k] = 1;
+            }
+        }
+        SetCursorPos(mid.x, mid.y);
+        have_last = 1;
+        inside = 1;
+    }
+    if (inside) {
+        g_mouse_btn[0] = key(VK_LBUTTON);
+        g_mouse_btn[1] = key(VK_RBUTTON);
+        g_mouse_btn[2] = key(VK_MBUTTON);
+    }
+    static long long last_dbg;
+    if (g_debug && g_mouse_owns && now_ms() - last_dbg >= 1000) {
+        last_dbg = now_ms();
+        raven_log("[rio2pad] mouse aim %.3f %.3f buttons %d%d%d\n", g_aim[0][0], g_aim[0][1], g_mouse_btn[0], g_mouse_btn[1], g_mouse_btn[2]);
+    }
+}
+
 static int trig(BYTE v) { return v * 65534 / 255 - 32767; }
 static int neg(SHORT v) { return v == -32768 ? 32767 : -v; }
 
@@ -361,6 +417,9 @@ static void poll_pads(void)
                 if (key(VK_RIGHT)) { a[0] = 32767; kb = 1; }
                 if (key(VK_UP))    { a[1] = -32767; kb = 1; }
                 if (key(VK_DOWN))  { a[1] = 32767; kb = 1; }
+                if (g_mouse_btn[0]) { a[5] = 32767; kb = 1; }
+                if (g_mouse_btn[1]) b[PAD_RB] = kb = 1;
+                if (g_mouse_btn[2]) { a[2] = 32767; kb = 1; }
             } else if (p == 1) {
                 if (key('2')) b[PAD_START] = kb = 1;
                 if (key('6')) b[PAD_Y] = kb = 1;
@@ -386,6 +445,10 @@ static void update_aim(void)
         float sx = g_pads[p].axis[3] / 32767.0f, sy = g_pads[p].axis[4] / 32767.0f;
         float lx = g_pads[p].axis[0] / 32767.0f, ly = g_pads[p].axis[1] / 32767.0f;
         if (lx * lx + ly * ly > sx * sx + sy * sy) { sx = lx; sy = ly; }
+        if (p == 0 && g_mouse_owns) {   // mouse has P1's aim until a stick is pushed
+            if (sx * sx + sy * sy < 0.3f * 0.3f) continue;
+            g_mouse_owns = 0;
+        }
         if (rio2pad_aim_mode) {
             g_aim[p][0] = 0.5f + 0.5f * sx;
             g_aim[p][1] = 0.5f + 0.5f * sy;
@@ -437,6 +500,7 @@ static DWORD WINAPI pad_thread(void *arg)
         long long t = now_ms();
         if (g_swlog && t - last_log >= 5000) { dump_swlog(); last_log = t; }
         if (g_proclog && t - last_proc >= 500) { log_procs(); last_proc = t; }
+        poll_mouse();
         poll_pads();
         update_aim();
         Sleep(4);
@@ -465,6 +529,11 @@ void rio2pad_install(void)
     if (ss) rio2pad_stick_speed = strtof(ss, NULL);
     const char *am = raven_env("RIO2PAD_AIM");
     rio2pad_aim_mode = am && !strcmp(am, "abs");
+    const char *mm = raven_env("RIO2PAD_MOUSE");
+    if (mm) rio2pad_mouse_mode = !strcmp(mm, "relative") ? 2 : (!strcmp(mm, "0") || !strcmp(mm, "off")) ? 0 : 1;
+    const char *ms = raven_env("RIO2PAD_MOUSESENS");
+    if (ms) rio2pad_mouse_sens = strtof(ms, NULL);
+    raven_log("[rio2pad] mouse %s, sensitivity %.2f\n", rio2pad_mouse_mode == 2 ? "relative" : rio2pad_mouse_mode ? "screen" : "off", rio2pad_mouse_sens);
     raven_log("[rio2pad] SKIPBOOT=%d FREEPLAY=%d DEBUG=%d\n", g_skipboot, g_freeplay, g_debug);
 
     *G_CABINET_TYPE = env_int("RIO2PAD_CABTYPE", 8);

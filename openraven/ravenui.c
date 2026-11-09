@@ -77,6 +77,8 @@ static item_t items[] = {
  {"Audio","Volume boost","volume",T_CHOICE,1,"100%|125%|150%|200%|250%|300%",0,0,0,"100%","Audio stream volume"},
  {"Input","Aim mode","aim",T_CHOICE,1,"cursor|abs",0,0,0,"cursor","cursor: stick moves aim. abs: stick = aim"},
  {"Input","Stick speed","stick_speed",T_NUM,1,NULL,0.1f,4,0.05f,"0.25","Screen widths per second (cursor mode)"},
+ {"Input","Mouse aim","mouse",T_CHOICE,1,"0|screen|relative",0,0,0,"screen","Player 1. screen: aim follows the pointer. relative: mouse moves the aim. Left fire, right reload, middle grenade"},
+ {"Input","Mouse sensitivity","mouse_sens",T_NUM,1,NULL,0.1f,5,0.1f,"1.0","Relative mode: 1.0 = one window width of mouse travel crosses the screen"},
  {"Overlay","Overlay size","ui_scale",T_CHOICE,1,"0.75|0.9|1.0|1.1|1.25|1.5|2.0",0,0,0,"1.0","Size of this menu. It always shrinks to fit the screen"},
  {"Cabinet","Free play","free_play",T_CHOICE,0,"0|1",0,0,0,"1",NULL},
  {"Cabinet","Skip boot checks","skip_boot",T_CHOICE,0,"0|1",0,0,0,"1","Skip file test + gun calibration"},
@@ -186,6 +188,8 @@ static void apply_live(item_t *it)
     else if (!strcmp(k, "volume")) { if (ui_open) set_volume(it->val); }   // launcher applies it at start
     else if (!strcmp(k, "aim")) { int *p = dlsym(RTLD_DEFAULT, "rio2pad_aim_mode"); if (p) *p = !strcmp(it->val, "abs"); }
     else if (!strcmp(k, "stick_speed")) { float *p = dlsym(RTLD_DEFAULT, "rio2pad_stick_speed"); if (p) *p = strtof(it->val, NULL); }
+    else if (!strcmp(k, "mouse")) { int *p = dlsym(RTLD_DEFAULT, "rio2pad_mouse_mode"); if (p) *p = !strcmp(it->val, "relative") ? 2 : !strcmp(it->val, "0") ? 0 : 1; }
+    else if (!strcmp(k, "mouse_sens")) { float *p = dlsym(RTLD_DEFAULT, "rio2pad_mouse_sens"); if (p) *p = strtof(it->val, NULL); }
     else if (!strcmp(k, "ui_scale")) { ui_user_scale = strtof(it->val, NULL); if (ui_user_scale < 0.5f) ui_user_scale = 0.5f; }
     else ravengfx_set(k, it->val);   // engine keys read every frame (bloomscale, glowscale)
 }
@@ -693,6 +697,8 @@ void ravengfx_overlay_draw(int sw, int sh)
     pthread_mutex_unlock(&ui_lock);
 }
 
+
+int ravenui_is_open(void) { return ui_open; }   // rio2pad: no mouse aim/fire while the menu is up
 
 void ravenui_start(void)
 {

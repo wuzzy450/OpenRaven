@@ -35,6 +35,8 @@ extern char ravengfx_conf_path[];
 extern float ravengfx_fps;
 extern int rio2pad_aim_mode;
 extern float rio2pad_stick_speed;
+extern int rio2pad_mouse_mode;
+extern float rio2pad_mouse_sens;
 void raven_fmod_set_volume(float boost);
 float raven_fmod_volume_from_pct(const char *pct);
 void *gl_resolve(const char *name);
@@ -92,6 +94,8 @@ static item_t items[] = {
  {"Audio","Volume boost","volume",T_CHOICE,1,"100%|150%|200%|250%|300%|350%|400%",0,0,0,"300%","Master volume (300% = Linux default level)"},
  {"Input","Aim mode","aim",T_CHOICE,1,"cursor|abs",0,0,0,"cursor","cursor: stick moves aim. abs: stick = aim"},
  {"Input","Stick speed","stick_speed",T_NUM,1,NULL,0.1f,4,0.05f,"0.25","Screen widths per second (cursor mode)"},
+ {"Input","Mouse aim","mouse",T_CHOICE,1,"0|screen|relative",0,0,0,"screen","Player 1. screen: aim follows the pointer. relative: mouse moves the aim. Left fire, right reload, middle grenade"},
+ {"Input","Mouse sensitivity","mouse_sens",T_NUM,1,NULL,0.1f,5,0.1f,"1.0","Relative mode: 1.0 = one window width of mouse travel crosses the screen"},
  {"Overlay","Overlay size","ui_scale",T_CHOICE,1,"0.75|0.9|1.0|1.1|1.25|1.5|2.0",0,0,0,"1.0","Size of this menu. It always shrinks to fit the screen"},
  {"Cabinet","Free play","free_play",T_CHOICE,0,"0|1",0,0,0,"1",NULL},
  {"Cabinet","Skip boot checks","skip_boot",T_CHOICE,0,"0|1",0,0,0,"1","Skip file test + gun calibration"},
@@ -196,6 +200,8 @@ static void apply_live(item_t *it)
     else if (!strcmp(k, "volume")) { if (ui_open) raven_fmod_set_volume(raven_fmod_volume_from_pct(it->val)); }   // shim_fmod applies it at start
     else if (!strcmp(k, "aim")) rio2pad_aim_mode = !strcmp(it->val, "abs");
     else if (!strcmp(k, "stick_speed")) rio2pad_stick_speed = strtof(it->val, NULL);
+    else if (!strcmp(k, "mouse")) rio2pad_mouse_mode = !strcmp(it->val, "relative") ? 2 : !strcmp(it->val, "0") ? 0 : 1;
+    else if (!strcmp(k, "mouse_sens")) rio2pad_mouse_sens = strtof(it->val, NULL);
     else if (!strcmp(k, "ui_scale")) { ui_user_scale = strtof(it->val, NULL); if (ui_user_scale < 0.5f) ui_user_scale = 0.5f; }
     else ravengfx_set(k, it->val);   // engine keys read every frame (bloomscale, glowscale)
 }
