@@ -73,6 +73,12 @@ function Take-Program([string[]]$paths) {
     }
 }
 
+# Archive entries that could be game / halo.so: by name, or (renamed) by exact size.
+function Program-Candidates($entries) {
+    $entries | Where-Object { $_.Path -match '(^|/)(game|halo\.so)$' -or $_.Size -eq $SIZE_GAME -or $_.Size -eq $SIZE_HALOSO } |
+        Where-Object { $_.Path -notmatch '(^|/)pm/g7/halo/data/' } | ForEach-Object { $_.Path }
+}
+
 # Look through one archive and take what it has. $depth > 0 = an archive found inside another one.
 function Use-Archive($a, $depth = 0) {
     Say "Checking $(Split-Path -Leaf $a)"
@@ -91,6 +97,8 @@ function Use-Archive($a, $depth = 0) {
         if (Test-Path -LiteralPath $tmpA) { Remove-Item -LiteralPath $tmpA -Recurse -Force }
         Extract $a $tmpA @()
         $extracted = $true
+        # take game / halo.so first: they sit in pm/g7/halo, which is moved away below
+        if (-not (Have-Dec)) { Take-Program @(Program-Candidates $entries | ForEach-Object { Join-Path $tmpA $_ }) }
         $src = Join-Path $tmpA ($prefix + 'pm')
         if (Test-Path -LiteralPath (Join-Path $Root 'pm')) {
             # keep anything already there, add the rest
@@ -99,9 +107,8 @@ function Use-Archive($a, $depth = 0) {
     }
 
     # decrypted game / halo.so: by name, or (renamed) by exact size; then checked by hash
-    if (-not (Have-Dec)) {
-        $cands = @($entries | Where-Object { $_.Path -match '(^|/)(game|halo\.so)$' -or $_.Size -eq $SIZE_GAME -or $_.Size -eq $SIZE_HALOSO } |
-                   Where-Object { $_.Path -notmatch '(^|/)pm/g7/halo/data/' } | ForEach-Object { $_.Path })
+    if (-not (Have-Dec) -and -not $extracted) {
+        $cands = @(Program-Candidates $entries)
         if ($cands) {
             if (-not $extracted) {
                 if (Test-Path -LiteralPath $tmpA) { Remove-Item -LiteralPath $tmpA -Recurse -Force }
@@ -109,8 +116,8 @@ function Use-Archive($a, $depth = 0) {
             }
             Take-Program @($cands | ForEach-Object { Join-Path $tmpA $_ })
         }
-        if ($data -and -not (Have-Dec)) { $script:DataOnlyPack = Split-Path -Leaf $a }
     }
+    if ($data -and -not (Have-Dec)) { $script:DataOnlyPack = Split-Path -Leaf $a }
 
     # archives inside this archive (for example a .zip holding the .7z)
     if (-not (Ready) -and $depth -lt 2) {
@@ -180,10 +187,10 @@ try {
             if (-not (Have-Data)) { Say 'Still needed: your game archive (the one with the pm\g7\halo\data folder).' Yellow }
             if (-not (Have-Dec)) {
                 if ($script:DataOnlyPack) {
-                    Say "Got the game data from '$($script:DataOnlyPack)'. Still needed: the decrypted v3.11 game program (game + halo.so)." Yellow
-                    Say 'Game archives never contain it; it comes as a separate small pack (usually 3.11-dec.zip, about 11 MB). Pick that file.' Yellow
+                    Say "Got the game data from '$($script:DataOnlyPack)'. Still needed: the v3.11 game program (game + halo.so); that archive doesn't have it (the v3.11 .7z pack never has halo.so)." Yellow
+                    Say 'Pick an archive that has them: the [TP] zip, or a 3.11-dec pack.' Yellow
                 } else {
-                    Say 'Still needed: the decrypted v3.11 game program (game + halo.so, usually 3.11-dec.zip, about 11 MB). None of the archives checked had it.' Yellow
+                    Say 'Still needed: the v3.11 game program (game + halo.so). None of the archives checked had it: pick the [TP] zip or a 3.11-dec pack.' Yellow
                 }
             }
             $picked = Pick-Archives

@@ -141,7 +141,6 @@ use_archive() {   # archive [depth]  (depth > 0 = an archive found inside anothe
     echo "[OpenRaven] Extracting game data (about $(( bytes / 1073741824 + 1 )) GB, takes a few minutes)..."
     extract "$a" "$tmpa"
     extracted=1
-    if [ -d "$ROOT/pm" ]; then cp -a "$tmpa/${prefix}pm/." "$ROOT/pm/"; else mv "$tmpa/${prefix}pm" "$ROOT/pm"; fi
   fi
   if ! have_dec; then
     local cands; cands=$(printf '%s\n' "$entries" | awk -F'\t' -v g="$SIZE_GAME" -v h="$SIZE_HALOSO" '
@@ -151,8 +150,12 @@ use_archive() {   # archive [depth]  (depth > 0 = an archive found inside anothe
       [ "$extracted" = 1 ] || extract "$a" "$tmpa" "${m[@]}"
       take_program "${m[@]/#/$tmpa/}"
     fi
-    if [ -n "$data" ] && ! have_dec; then DATA_ONLY_PACK="$(basename "$a")"; fi
   fi
+  # move the data into place only now: game / halo.so sit in pm/g7/halo and were taken from there first
+  if [ "$extracted" = 1 ] && [ -n "$data" ]; then
+    if [ -d "$ROOT/pm" ]; then cp -a "$tmpa/${prefix}pm/." "$ROOT/pm/"; else mv "$tmpa/${prefix}pm" "$ROOT/pm"; fi
+  fi
+  if [ -n "$data" ] && ! have_dec; then DATA_ONLY_PACK="$(basename "$a")"; fi
   # archives inside this archive (for example a .zip holding the .7z)
   if ! ready && [ "$depth" -lt 2 ]; then
     local sz p
@@ -196,10 +199,10 @@ if ! ready; then
     have_data || echo "[OpenRaven] Still needed: your game archive (the one with the pm/g7/halo/data folder)."
     if ! have_dec; then
       if [ -n "$DATA_ONLY_PACK" ]; then
-        echo "[OpenRaven] Got the game data from '$DATA_ONLY_PACK'. Still needed: the decrypted v3.11 game program (game + halo.so)."
-        echo "[OpenRaven] Game archives never contain it; it comes as a separate small pack (usually 3.11-dec.zip, about 11 MB). Pick that file."
+        echo "[OpenRaven] Got the game data from '$DATA_ONLY_PACK'. Still needed: the v3.11 game program (game + halo.so); that archive doesn't have it (the v3.11 .7z pack never has halo.so)."
+        echo "[OpenRaven] Pick an archive that has them: the [TP] zip, or a 3.11-dec pack."
       else
-        echo "[OpenRaven] Still needed: the decrypted v3.11 game program (game + halo.so, usually 3.11-dec.zip, about 11 MB). None of the archives checked had it."
+        echo "[OpenRaven] Still needed: the v3.11 game program (game + halo.so). None of the archives checked had it: pick the [TP] zip or a 3.11-dec pack."
       fi
     fi
     picked=$(pick_archive)
