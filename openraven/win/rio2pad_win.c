@@ -50,7 +50,7 @@ struct pad {
 };
 static struct pad g_pads[MAX_PADS];
 
-static int g_debug, g_autostart, g_probe = -1, g_freeplay = 1, g_continueshoot, g_proclog, g_skipboot;
+static int g_debug, g_autostart, g_probe = -1, g_freeplay = 1, g_continueshoot, g_proclog, g_skipboot, g_gunlevel;
 static int g_coin_ids[MAX_PADS] = {570, 571, -1, -1};
 static volatile unsigned g_swcount[MAX_SW];
 static signed char g_swstate[MAX_SW];
@@ -146,8 +146,39 @@ static int test_pressed(void)
     return 0;
 }
 
+// Gun buttons as the cabinet I/O board reported them to the game's switch dispatcher (0x4ad80c):
+// record +4 = new presses, +8 = new releases, +0xc = held. Reporting the level in +4 instead made the
+// game see a fresh press every frame and never "held", so full-auto weapons (needler, plasma rifle)
+// never got their automatic fire. One physical button can feed two logical ids, so the dispatcher may
+// ask twice in one poll: edges are worked out once per poll (calls < 3 ms apart share them).
+#define SW_DISPATCH_RET 0x4ad811ULL
+static void gun_report(int id, int level, unsigned char *f)
+{
+    static int last[10], snap_p[10], snap_r[10];
+    static double snap_t[10];
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    double t = (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
+    int k = id - 793;
+    static int said;
+    if (!said) { said = 1; raven_log("[rio2pad] gun buttons: edge + held reporting (RIO2PAD_GUNLEVEL=1 = old way)\n"); }
+    if (t - snap_t[k] >= 3.0) {
+        if (g_debug && level != last[k]) raven_log("[rio2pad] gun switch %d %s\n", id, level ? "pressed" : "released");
+        snap_p[k] = level && !last[k];
+        snap_r[k] = !level && last[k];
+        last[k] = level;
+        snap_t[k] = t;
+    }
+    ((int *)f)[1] = snap_p[k];
+    ((int *)f)[2] = snap_r[k];
+    ((int *)f)[3] = last[k];
+}
+
 static SV void *sw_get_hook(int id)
 {
+    uint64_t caller = (uint64_t)__builtin_return_address(0);
     void *rec = sw_get_orig(id);
     int pressed = -1;
 
@@ -181,7 +212,8 @@ static SV void *sw_get_hook(int id)
     unsigned char *f = g_fake[InterlockedIncrement(&g_fake_i) & 7];
     if (rec) memcpy(f, rec, sizeof g_fake[0]);
     else     memset(f, 0, sizeof g_fake[0]);
-    ((int *)f)[1] = pressed;
+    if (id >= 793 && id <= 802 && caller == SW_DISPATCH_RET && !g_gunlevel) gun_report(id, pressed, f);
+    else ((int *)f)[1] = pressed;
     return f;
 }
 
@@ -515,6 +547,7 @@ void rio2pad_install(void)
     g_debug = raven_env("RIO2PAD_DEBUG") != NULL;
     g_autostart = raven_env("RIO2PAD_AUTOSTART") != NULL;
     g_continueshoot = raven_env("RIO2PAD_CONTINUESHOOT") != NULL;
+    g_gunlevel = raven_env("RIO2PAD_GUNLEVEL") != NULL;   // old gun-button reporting (press every frame)
     g_proclog = raven_env("RIO2PAD_PROCLOG") != NULL;
     g_freeplay = env_int("RIO2PAD_FREEPLAY", 1) != 0;
     g_skipboot = env_int("RIO2PAD_SKIPBOOT", 1) != 0;

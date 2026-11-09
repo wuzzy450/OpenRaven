@@ -84,6 +84,33 @@ static long long now_ms(void)
     return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
 }
 
+// Gun buttons as the cabinet I/O board reported them to the game's switch dispatcher (0x4ad80c):
+// record +4 = new presses, +8 = new releases, +0xc = held. Reporting the level in +4 instead made the
+// game see a fresh press every frame and never "held", so full-auto weapons (needler, plasma rifle)
+// never got their automatic fire. One physical button can feed two logical ids, so the dispatcher may
+// ask twice in one poll: edges are worked out once per poll (calls < 3 ms apart share them).
+// RIO2PAD_GUNLEVEL=1 = old way.
+#define SW_DISPATCH_RET 0x4ad811UL
+static void gun_report(int id, int level, unsigned char *f)
+{
+    static int last[10], snap_p[10], snap_r[10], said;
+    static double snap_t[10];
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double t = ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+    int k = id - 793;
+    if (!said) { said = 1; fprintf(stderr, "[rio2pad] gun buttons: edge + held reporting (RIO2PAD_GUNLEVEL=1 = old way)\n"); }
+    if (t - snap_t[k] >= 3.0) {
+        snap_p[k] = level && !last[k];
+        snap_r[k] = !level && last[k];
+        last[k] = level;
+        snap_t[k] = t;
+    }
+    ((int *)f)[1] = snap_p[k];
+    ((int *)f)[2] = snap_r[k];
+    ((int *)f)[3] = last[k];
+}
+
 // A coin mech gives one short pulse per coin; the game counts every poll that sees it closed.
 static int coin_pulse(int p) { return g_pads[p].fd != -1 && now_ms() - g_pads[p].coin_t < 60; }
 
@@ -158,8 +185,7 @@ static int in_continue(int p)
 static int trigger_pressed(int p)
 {
     static int block[MAX_PADS];
-    int down = (g_pads[p].fd != -1 && (g_pads[p].axis[5] > 0 || (g_pads[p].fd == -2 && g_pads[p].axis[5] > -16000 && g_pads[p].axis[5] != 0)))
-               || (p == 0 && g_mouse_btn[0]);   // left click
+    int down = (g_pads[p].fd != -1 && g_pads[p].axis[5] > 0) || (p == 0 && g_mouse_btn[0]);
     if (getenv("RIO2PAD_CONTINUESHOOT")) return down;
     if (in_continue(p)) { block[p] = 1; return 0; }
     if (block[p] && down) return 0;   // still held from the countdown
@@ -176,6 +202,7 @@ static int test_pressed(void)
 
 static void *sw_get_hook(int id)
 {
+    unsigned long caller = (unsigned long)__builtin_return_address(0);
     void *rec = sw_get_orig(id);
     int pressed = -1;
 
@@ -204,8 +231,7 @@ static void *sw_get_hook(int id)
         pressed = 0;
         if (k == 2) pressed = trigger_pressed(p);                                       // RT
         if (k == 3) pressed = btn(p, PAD_RB) || (p == 0 && g_mouse_btn[2]);            // RB / right click = reload
-        if (k == 4) pressed = (g_pads[p].fd != -1 && (g_pads[p].axis[2] > 0 || (g_pads[p].fd == -2 && g_pads[p].axis[2] > -16000 && g_pads[p].axis[2] != 0)))
-                              || (p == 0 && g_mouse_btn[1]);   // LT / middle click = grenade
+        if (k == 4) pressed = (g_pads[p].fd != -1 && g_pads[p].axis[2] > 0) || (p == 0 && g_mouse_btn[1]);   // LT / middle = grenade
     }
     // Player START in the gun cabinet: the type-8 remap sends 581 -> logical 0x24e and 582 -> 0x251,
     // and the game reads "Player N Start" as logical 0x24e + slot (gun 2 is slot 3). Same switch
@@ -237,7 +263,8 @@ static void *sw_get_hook(int id)
     unsigned char *f = g_fake[g_fake_i++ & 7];
     if (rec) memcpy(f, rec, sizeof g_fake[0]);
     else     memset(f, 0, sizeof g_fake[0]);
-    ((int *)f)[1] = pressed;
+    if (id >= 793 && id <= 802 && caller == SW_DISPATCH_RET && !getenv("RIO2PAD_GUNLEVEL")) gun_report(id, pressed, f);
+    else ((int *)f)[1] = pressed;
     if (g_debug && pressed) fprintf(stderr, "[rio2pad] switch %d -> pressed\n", id);
     return f;
 }
@@ -347,11 +374,7 @@ static int adj_get_hook(const char *sec, const char *key)
         int r = v;
         if (!strcmp(key, "gameVolume")) {
             if (getenv("RIO2PAD_GAMEVOL")) r = atoi(getenv("RIO2PAD_GAMEVOL"));
-            else r = 100;
-        }
-        if (!strcmp(key, "attractVolume")) {
-            if (getenv("RIO2PAD_ATTRACTVOL")) r = atoi(getenv("RIO2PAD_ATTRACTVOL"));
-            else r = 100;
+            else if (v == 0) r = 100;
         }
         for (int i = 0; i < 8; i++) {
             if (!strcmp(seen[i], key)) break;
