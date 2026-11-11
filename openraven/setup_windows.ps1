@@ -251,7 +251,7 @@ function Use-Archive($a, $depth = 0) {
 
     # archives inside this archive (for example a .zip holding the .7z)
     if (-not (Ready) -and $depth -lt 2) {
-        $inner = @($entries | Where-Object { $_.Path -match '\.(zip|7z|rar)$' })
+        $inner = @($entries | Where-Object { $_.Path -match '\.(zip|7z|rar)$' -and $_.Path -notmatch '(^|/)pm/g7/' })   # the game's own data has .zip files that are not archives to unpack
         foreach ($i in $inner) {
             if (Ready) { break }
             $p = Join-Path $tmpA $i.Path
@@ -259,7 +259,7 @@ function Use-Archive($a, $depth = 0) {
                 if ($i.Size -gt 0) { Need-Space $i.Size "$($i.Path) (an archive inside $(Split-Path -Leaf $a))" }
                 Extract $a $tmpA @($i.Path)
             }
-            Use-Archive $p ($depth + 1)
+            try { Use-Archive $p ($depth + 1) } catch { Log-Report "Skipped inner archive $($i.Path): $($_.Exception.Message)"; Say "Skipped $($i.Path) (could not read it)" DarkGray }
         }
     }
     if (Test-Path -LiteralPath $tmpA) { Remove-Item -LiteralPath $tmpA -Recurse -Force }
