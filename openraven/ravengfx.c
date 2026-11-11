@@ -366,54 +366,16 @@ static void try_set_fullscreen(void *cd_ptr, unsigned long cdr_win)
     typedef unsigned long (*pfn_XDefaultRootWindow)(void *);
     typedef int (*pfn_XSendEvent)(void *, unsigned long, int, long, void *);
     typedef int (*pfn_XFlush)(void *);
-    typedef int (*pfn_XDefaultScreen)(void *);
-    typedef int (*pfn_XDisplayWidth)(void *, int);
-    typedef int (*pfn_XDisplayHeight)(void *, int);
-    typedef int (*pfn_XMoveResizeWindow)(void *, unsigned long, int, int, unsigned int, unsigned int);
-    typedef int (*pfn_XChangeProperty)(void *, unsigned long, unsigned long, unsigned long, int, int, const unsigned char *, int);
 
     pfn_XInternAtom pXInternAtom = (pfn_XInternAtom)dlsym(x11, "XInternAtom");
     pfn_XDefaultRootWindow pXDefaultRootWindow = (pfn_XDefaultRootWindow)dlsym(x11, "XDefaultRootWindow");
     pfn_XSendEvent pXSendEvent = (pfn_XSendEvent)dlsym(x11, "XSendEvent");
     pfn_XFlush pXFlush = (pfn_XFlush)dlsym(x11, "XFlush");
-    pfn_XDefaultScreen pXDefaultScreen = (pfn_XDefaultScreen)dlsym(x11, "XDefaultScreen");
-    pfn_XDisplayWidth pXDisplayWidth = (pfn_XDisplayWidth)dlsym(x11, "XDisplayWidth");
-    pfn_XDisplayHeight pXDisplayHeight = (pfn_XDisplayHeight)dlsym(x11, "XDisplayHeight");
-    pfn_XMoveResizeWindow pXMoveResizeWindow = (pfn_XMoveResizeWindow)dlsym(x11, "XMoveResizeWindow");
-    pfn_XChangeProperty pXChangeProperty = (pfn_XChangeProperty)dlsym(x11, "XChangeProperty");
 
     if (!pXInternAtom || !pXFlush) return;
 
-    const char *is_wsl_env = getenv("IS_WSL");
-    int is_wsl = (is_wsl_env && atoi(is_wsl_env) != 0) || access("/mnt/wslg", F_OK) == 0;
-
-    if (is_wsl) {
-        // Under WSLg (Weston FreeRDP RAIL backend), _NET_WM_STATE_FULLSCREEN causes Weston
-        // to unmap or hide the window from the Windows desktop. To achieve borderless fullscreen
-        // without dropping out of RAIL, strip decorations via _MOTIF_WM_HINTS and resize to screen.
-        if (pXChangeProperty) {
-            unsigned long motif_hints = pXInternAtom(cd_ptr, "_MOTIF_WM_HINTS", 0);
-            if (motif_hints) {
-                // flags = MWM_HINTS_DECORATIONS (2), decorations = 0 (none)
-                unsigned long hints[5] = { 2, 0, 0, 0, 0 };
-                pXChangeProperty(cd_ptr, cdr_win, motif_hints, motif_hints, 32, 0 /* PropModeReplace */, (const unsigned char *)hints, 5);
-            }
-        }
-        if (pXMoveResizeWindow && pXDefaultScreen && pXDisplayWidth && pXDisplayHeight) {
-            int scr = pXDefaultScreen(cd_ptr);
-            int sw = pXDisplayWidth(cd_ptr, scr);
-            int sh = pXDisplayHeight(cd_ptr, scr);
-            if (sw <= 640 && ravengfx_win_w > sw) sw = ravengfx_win_w;
-            if (sh <= 480 && ravengfx_win_h > sh) sh = ravengfx_win_h;
-            pXMoveResizeWindow(cd_ptr, cdr_win, 0, 0, (unsigned int)sw, (unsigned int)sh);
-        }
-        pXFlush(cd_ptr);
-        attempts++;
-        if (attempts == 1) {
-            fprintf(stderr, "[ravengfx] applied borderless window for WSLg on window 0x%lx\n", cdr_win);
-        }
-    } else {
-        // Native Linux: standard EWMH _NET_WM_STATE_FULLSCREEN
+    {
+        // Standard EWMH _NET_WM_STATE_FULLSCREEN
         if (!pXDefaultRootWindow || !pXSendEvent) return;
         unsigned long wm_state = pXInternAtom(cd_ptr, "_NET_WM_STATE", 0);
         unsigned long wm_fullscreen = pXInternAtom(cd_ptr, "_NET_WM_STATE_FULLSCREEN", 0);
@@ -450,6 +412,25 @@ static void try_set_fullscreen(void *cd_ptr, unsigned long cdr_win)
     }
 }
 
+// Steam Gaming Mode (gamescope) shows the game only once a window carries STEAM_GAME = the app id.
+// The game is started inside a sandbox, so Steam can't label it itself. Done once, on the game's own window.
+static void set_steam_game(void *d, unsigned long w)
+{
+    static int done; if (done) return; done = 1;
+    const char *id = getenv("SteamAppId"); if (!id || !*id) id = getenv("SteamGameId");
+    unsigned long v = id ? strtoul(id, NULL, 10) : 0;
+    if (!v) return;
+    void *x11 = dlopen("libX11.so.6", RTLD_LAZY); if (!x11) return;
+    unsigned long (*ia)(void *, const char *, int) = dlsym(x11, "XInternAtom");
+    int (*cp)(void *, unsigned long, unsigned long, unsigned long, int, int, const unsigned char *, int) = dlsym(x11, "XChangeProperty");
+    int (*fl)(void *) = dlsym(x11, "XFlush");
+    if (!ia || !cp || !fl) return;
+    unsigned long atom = ia(d, "STEAM_GAME", 0); if (!atom) return;
+    cp(d, w, atom, 6 /* XA_CARDINAL */, 32, 0 /* PropModeReplace */, (const unsigned char *)&v, 1);
+    fl(d);
+    fprintf(stderr, "[ravengfx] STEAM_GAME = %lu on window 0x%lx\n", v, w);
+}
+
 // HDR = 1: ravenhdr.c presents through Vulkan HDR10 instead of the game's swap (else it falls back).
 int ravenhdr_present(void);
 static void present_or_hdr(void *ctx) { if (!ravenhdr_present()) ((void (*)(void *))PRESENT_FN)(ctx); }
@@ -459,7 +440,7 @@ static void my_present(void *ctx)
     void *(*cd)(void) = glsym("glXGetCurrentDisplay"); unsigned long (*cdr)(void) = glsym("glXGetCurrentDrawable");
     if (cd && cdr) {
         void *d = cd(); unsigned long w = cdr();
-        if (d && w) try_set_fullscreen(d, w);
+        if (d && w) { set_steam_game(d, w); try_set_fullscreen(d, w); }
     }
     static double in_sum, out_sum, tprev; static long n;
     static int si_cur = -2, si_n;          // VSYNC / SWAP_INTERVAL (live from the overlay) / RAVENGFX_SWAPINTERVAL

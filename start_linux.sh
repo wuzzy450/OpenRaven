@@ -5,6 +5,26 @@ set -e
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
+# Steam Launch Options "/path/start_linux.sh %command%": Steam passes its own launch command (its
+# wrappers such as reaper / SteamLaunch, then the shortcut's target) as arguments. Keep the wrappers
+# and run the game inside them, so Steam tracks the game and Gaming Mode switches to it.
+STEAM_WRAP=()
+if [ $# -gt 0 ] && [ -x "$1" ] && [ ! -d "$1" ]; then
+  case "$1" in *.zip|*.7z|*.rar|*.tar|*.tar.*|*.iso) ;; *)
+    # The wrappers end at this script (Steam runs it as the target) or at "--" (then the target after it
+    # is replaced by the game). Anything after that is passed on (a resolution, for example).
+    ARGS=("$@"); SELF="$(readlink -f "${BASH_SOURCE[0]}")"; cut=-1
+    for i in "${!ARGS[@]}"; do [ "$(readlink -f "${ARGS[$i]}" 2>/dev/null)" = "$SELF" ] && { cut=$i; break; }; done
+    if [ $cut -lt 0 ]; then for i in "${!ARGS[@]}"; do [ "${ARGS[$i]}" = "--" ] && { cut=$((i + 1)); break; }; done; fi
+    if [ $cut -ge 0 ]; then
+      STEAM_WRAP=("${ARGS[@]:0:$cut}"); set -- "${ARGS[@]:$((cut + 1))}"
+    else
+      echo "[OpenRaven] Ignoring launch arguments that aren't a game archive or resolution: $*"; set --
+    fi
+    [ ${#STEAM_WRAP[@]} -gt 0 ] && echo "[OpenRaven] Steam launch: running the game inside: ${STEAM_WRAP[*]}" ;;
+  esac
+fi
+
 echo "================================================================"
 echo "  OpenRaven — Halo: Fireteam Raven (v3.11) PC Loader"
 echo "================================================================"
@@ -267,4 +287,4 @@ if [ $# -gt 0 ]; then
   fi
 fi
 
-exec "$ROOT/openraven/play_halo.sh" "$@"
+exec "${STEAM_WRAP[@]}" "$ROOT/openraven/play_halo.sh" "$@"
