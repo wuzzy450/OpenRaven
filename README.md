@@ -59,6 +59,14 @@ The first run installs what it needs (asking for your password), finds your game
 
 To force-close the game (arcade games have no quit button): `./openraven/stop_halo.sh`
 
+### "Still needed: the v3.11 game program (game + halo.so)"
+
+If setup unpacks your game data but then asks for the game program, your archive most likely contains the original, encrypted arcade executable, which is locked to the cabinet's HASP security dongle and only runs on the real machine with the dongle.
+
+OpenRaven doesn't include a HASP decrypter or dongle emulator. It needs an already-unpacked, unencrypted v3.11 program (`game` and `halo.so`) to run. Because of copyright law and anti-circumvention laws such as the DMCA, the OpenRaven project can't distribute those files, provide tools that remove the dongle protection, or point you to where to get them. OpenRaven only ships its own loader code; you supply the game files.
+
+If you have another copy of v3.11 that includes both files, run setup again and pick it. Your game data is kept, so setup only needs those two files.
+
 ---
 
 ## Controls

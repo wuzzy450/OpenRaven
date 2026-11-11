@@ -318,9 +318,9 @@ try {
             if (-not (Have-Dec)) {
                 if ($script:DataOnlyPack) {
                     Say "Got the game data from '$($script:DataOnlyPack)'. Still needed: the v3.11 game program (game + halo.so); that archive doesn't have it (the v3.11 .7z pack never has halo.so)." Yellow
-                    Say 'Pick an archive that has them: a full v3.11 zip, or a 3.11-dec pack.' Yellow
+                    Say 'Pick an archive that has them: a v3.11 copy that includes both files (see README).' Yellow
                 } else {
-                    Say 'Still needed: the v3.11 game program (game + halo.so). None of the archives checked had it: pick a full v3.11 zip or a 3.11-dec pack.' Yellow
+                    Say 'Still needed: the v3.11 game program (game + halo.so). None of the archives checked had it: pick a v3.11 copy that includes both files (see README).' Yellow
                 }
             }
             $picked = Pick-Archives
