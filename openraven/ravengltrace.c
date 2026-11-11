@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <dlfcn.h>
+#include "glsl_compat.h"
 
 typedef unsigned GLenum, GLuint, GLbitfield; typedef int GLint, GLsizei; typedef unsigned char GLboolean;
 
@@ -306,12 +307,14 @@ static char *rewrite_tonemap(const char *src){
 // graphics.ini DUMP_SHADERS = 1: append every shader source the game compiles to shader_dump.txt (debug).
 static void w_glShaderSource(GLuint sh, GLsizei n, const char *const *str, const GLint *len){
     const char *dv = ravengfx_get("DUMP_SHADERS"); int dump = dv && atoi(dv);
-    if (!dump && !ravenhdr_on()) { r_glShaderSource(sh, n, str, len); return; }
     size_t tot = 0;
     for (GLsizei i = 0; i < n; i++) tot += len && len[i] >= 0 ? (size_t)len[i] : strlen(str[i]);
     char *all = malloc(tot + 1), *p = all;
+    if (!all) { r_glShaderSource(sh, n, str, len); return; }
     for (GLsizei i = 0; i < n; i++) { size_t l = len && len[i] >= 0 ? (size_t)len[i] : strlen(str[i]); memcpy(p, str[i], l); p += l; }
     *p = 0;
+    int fixes = raven_glsl_compat(all);
+    if (fixes) fprintf(stderr, "[glsl-compat] shader %u: modernized %d legacy sampler call(s)\n", sh, fixes);
     if (dump) { FILE *f = fopen("/pm/g7/dump/shader_dump.txt", "ab"); if (f) { fprintf(f, "==== shader %u\n%s\n", sh, all); fclose(f); } }
     char *hd = ravenhdr_on() ? rewrite_tonemap(all) : NULL;
     const char *one = hd ? hd : all;
@@ -337,7 +340,8 @@ void ravengl_trace_frame(double t)     // called from the present hook, before t
         installed = 1;
         const char *e = getenv("RAVENGFX_GLTRACE");
         fsr = ravenfsr_wanted(); fg = !getenv("RAVENGFX_NOGLHOOK") && ravenfg_wanted();
-        if (!e && !fsr && !fg && !sprite_clamp() && !ravenhdr_on()) return;
+        // Shader compatibility also needs the source hook when enhancements are off.
+        if (getenv("RAVENGFX_NOGLHOOK") && !e) return;
         trace_at = e ? atof(e) : -1;
         q_fbattach = gpa("glGetNamedFramebufferAttachmentParameteriv"); q_texlevel = gpa("glGetTextureLevelParameteriv");
         q_rbparam = gpa("glGetNamedRenderbufferParameteriv"); q_progiv = gpa("glGetProgramiv");

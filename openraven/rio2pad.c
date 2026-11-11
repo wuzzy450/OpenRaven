@@ -487,7 +487,9 @@ static int x_init(void)
 static int x_ours(XID_ w)
 {
     static XID_ last; static int last_ok;
-    if (w == last) return last_ok;
+    // A newly mapped window may not yet have its _NET_WM_PID property.
+    // Retry a negative lookup so startup timing cannot permanently disable input.
+    if (w == last && last_ok) return 1;
     last = w; last_ok = 0;
     XID_ pid_atom = X.atom(X.dpy, "_NET_WM_PID", 0), cur = w;
     for (int depth = 0; cur && depth < 8; depth++) {
