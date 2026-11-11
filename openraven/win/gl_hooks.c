@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "shim.h"
+#include "../glsl_compat.h"   // shared with Linux (ravengltrace.c)
 
 void *gl_resolve(const char *name);
 int ravenfsr_wanted(void);
@@ -263,17 +264,22 @@ static char *rewrite_tonemap(const char *src) {
     return o;
 }
 
+// Every shader goes through raven_glsl_compat: some effect shaders ask for "#version ... core" but use
+// texture2D/textureCube, which strict compilers (AMD, Intel, Mesa) reject, so Elite/Jackal shields, the
+// energy sword and Spirit effects would be missing. NVIDIA accepts them either way.
 // graphics.ini DUMP_SHADERS = 1: append every shader source the game compiles to shader_dump.txt (debug).
 static SV void h_glShaderSource(GLuint sh, GLsizei n, const GLchar *const *str, const GLint *len) {
     REAL(glShaderSource, PFNGLSHADERSOURCEPROC);
     const char *dv = ravengfx_get("DUMP_SHADERS");
     int dump = dv && atoi(dv);
-    if (!dump && !ravenhdr_float_fb) { r_glShaderSource(sh, n, str, len); return; }
     size_t tot = 0;
     for (GLsizei i = 0; i < n; i++) tot += len && len[i] >= 0 ? (size_t)len[i] : strlen(str[i]);
     char *all = malloc(tot + 1), *p = all;
+    if (!all) { r_glShaderSource(sh, n, str, len); return; }
     for (GLsizei i = 0; i < n; i++) { size_t l = len && len[i] >= 0 ? (size_t)len[i] : strlen(str[i]); memcpy(p, str[i], l); p += l; }
     *p = 0;
+    int fixes = raven_glsl_compat(all);
+    if (fixes) raven_log("[glsl-compat] shader %u: modernized %d legacy sampler call(s)\n", sh, fixes);
     if (dump) {
         char dp[MAX_PATH * 2]; snprintf(dp, sizeof dp, "%s/shader_dump.txt", g_root);
         FILE *f = fopen(dp, "ab");
