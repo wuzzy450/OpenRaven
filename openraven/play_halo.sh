@@ -39,19 +39,20 @@ CMD=(env LD_PRELOAD="$PRELOAD" ./game)
 # Background helpers below are stopped when the game exits.
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
-# graphics.ini `volume` below 100% (test runs use 0%): set the game's audio stream to it once per stream,
-# for the first minute. At 100% nothing is touched, so the system volume keys keep full control.
+# Set the game's audio stream to graphics.ini `volume` (default 100%; test runs use 0%) once per stream,
+# for the first minute. Always done, because the sound server remembers the last volume per app (a muted
+# test run would leave the next game silent). After that it isn't touched, so volume keys keep control.
 set_game_volume() {
   local done_ids=" "
   for _ in $(seq 1 30); do
     sleep 2
     for id in $(pactl list sink-inputs 2>/dev/null | awk '/^Sink Input #/{id=substr($3,2)} /PipeWire ALSA \[game\]|ALSA plug-in \[game\]|application.process.binary = "game"/{print id}' | sort -u); do
       case "$done_ids" in *" $id "*) continue;; esac
-      pactl set-sink-input-volume "$id" "$HALO_VOLUME" 2>/dev/null && done_ids="$done_ids$id "
+      pactl set-sink-input-volume "$id" "${HALO_VOLUME:-100%}" 2>/dev/null && done_ids="$done_ids$id "
     done
   done
 }
-case "${HALO_VOLUME:-100%}" in 100%|100|1.0) ;; *) set_game_volume & ;; esac
+set_game_volume &
 
 # Fullscreen: apply EWMH fullscreen via wmctrl.
 make_fullscreen() {
