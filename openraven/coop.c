@@ -304,6 +304,25 @@ int clock_gettime(clockid_t clk, struct timespec *ts)
     return real(clk, ts);
 }
 
+// ---- random numbers, exactly as the Windows loader gives them (win/shim_libc2.c) ----
+// glibc's rand state is shared with every library in the process (GL driver, FMOD threads) and the
+// game's srandom really reseeds it - from the clock during boot. Each PC then drew different numbers
+// (4-player cabinet desync). Windows: a private generator, srandom does nothing. Same numbers here, so
+// Linux and Windows PCs also agree with each other.
+static unsigned long long g_rand = 1;
+static int coop_rand(void)
+{
+    g_rand = g_rand * 6364136223846793005ULL + 1442695040888963407ULL;
+    return (int)(g_rand >> 33);
+}
+static int coop_rand_r(unsigned *seed)
+{
+    *seed = *seed * 1103515245 + 12345;
+    return (int)((*seed >> 1) & 0x7fffffff);
+}
+static void coop_srandom(unsigned s) { (void)s; }
+static int coop_timespec_get(struct timespec *ts, int base) { clock_gettime(CLOCK_REALTIME, ts); return base; }
+
 // ---- game clocks and the frame tick ----
 void coopnet_start(void);
 static void import_slots(const char *when);
@@ -404,9 +423,11 @@ static int patch_import_slots(void)
 {
     // (timed waits are left alone: their deadlines are not all on the clock the game reads, and moving
     // them stalled the 4-player boot)
-    enum { N = 7 };
-    static const char *names[N] = {"time", "gettimeofday", "clock_gettime", "usleep", "nanosleep", "pthread_create", "socket"};
-    void *mine[N] = {(void *)time, (void *)gettimeofday, (void *)clock_gettime, (void *)usleep, (void *)nanosleep, (void *)pthread_create, (void *)socket};
+    enum { N = 11 };
+    static const char *names[N] = {"time", "gettimeofday", "clock_gettime", "usleep", "nanosleep", "pthread_create", "socket",
+                                   "rand", "rand_r", "srandom", "timespec_get"};
+    void *mine[N] = {(void *)time, (void *)gettimeofday, (void *)clock_gettime, (void *)usleep, (void *)nanosleep, (void *)pthread_create, (void *)socket,
+                     (void *)coop_rand, (void *)coop_rand_r, (void *)coop_srandom, (void *)coop_timespec_get};
     void *real[N];
     for (int k = 0; k < N; k++) real[k] = dlsym(RTLD_NEXT, names[k]);
     const char *skip = getenv("RAVEN_SLOTSKIP");   // debug: comma list of names to leave alone
@@ -422,6 +443,11 @@ static void import_slots(const char *when)
     static int total;
     int n = patch_import_slots();
     if (n) { total += n; fprintf(stderr, "[coop] %d game import slot(s) -> virtual clock / gate (%s, %d so far)\n", n, when, total); }
+    if (getenv("RAVEN_SLOTLIST") && !strcmp(when, "first frame"))   // debug: every libc function the game calls
+        for (uint64_t *q = (uint64_t *)0x1690000UL; q < (uint64_t *)0x1692800UL; q++) {
+            Dl_info di;
+            if (*q > 0x7f0000000000ULL && dladdr((void *)*q, &di) && di.dli_sname) fprintf(stderr, "[slot] %p %s (%s)\n", (void *)q, di.dli_sname, di.dli_fname);
+        }
 }
 
 // Called from rio2pad.c's constructor (main thread), after coop_open.

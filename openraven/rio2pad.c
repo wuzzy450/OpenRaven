@@ -175,7 +175,9 @@ static void gun_aim(int g, float *x, float *y)
     if (g_coop_mode_get()) { ax = g_coop_aim_get(g, 0); ay = g_coop_aim_get(g, 1); }
     // hybrid menu view shows only the left half: keep every cursor inside it (also the stored aim,
     // so a stick does not drift on into the hidden half)
-    if (RAVEN_VIEW == 1 && ax > 0.5f) { ax = 0.5f; if (!g_coop_mode_get()) g_aim[g][0] = 0.5f; }
+    // Coop: done in coop_sample_live instead, before the input is shared - the view changes when
+    // this PC draws, a frame apart on two PCs, so clamping here desynced them.
+    if (!g_coop_mode_get() && RAVEN_VIEW == 1 && ax > 0.5f) ax = g_aim[g][0] = 0.5f;
     *x = ax;
     *y = 1.0f - ay;   // game's y runs bottom-to-top; ours (and the stick's) top-to-bottom
 }
@@ -278,6 +280,7 @@ static void coop_sample_live(struct coop_in *c)
         if (p == 0 && test_pressed()) b |= CI_TEST;
         if (coin_pulse(p)) b |= CI_COIN;
         c->bits[p] = b;
+        if (RAVEN_VIEW == 1 && g_aim[p][0] > 0.5f) g_aim[p][0] = 0.5f;   // hybrid menu: left half only
         c->aim[p][0] = g_aim[p][0];
         c->aim[p][1] = g_aim[p][1];
     }
@@ -316,6 +319,14 @@ void rio2pad_coop_frame(unsigned frame)
     }
     g_ci = c;
     g_coop_frame = frame;
+    static FILE *inlog; static int inl = -1;   // debug: RAVEN_INLOG=file, every frame's shared input
+    if (inl < 0) inl = (inlog = getenv("RAVEN_INLOG") ? fopen(getenv("RAVEN_INLOG"), "w") : NULL) != NULL;
+    if (inlog) {
+        fprintf(inlog, "%u", frame);
+        for (int p = 0; p < 4; p++) fprintf(inlog, " %02x %.5f %.5f", c.bits[p], c.aim[p][0], c.aim[p][1]);
+        fputc('\n', inlog);
+        if ((frame & 63) == 0) fflush(inlog);
+    }
 }
 
 static void coop_open(void)
@@ -416,7 +427,7 @@ static void *sw_get_hook(int id)
             time_t t = time(NULL);
             char ts[16];
             strftime(ts, sizeof ts, "%H:%M:%S", localtime(&t));
-            fprintf(g_inputlog, "%s switch %d %s\n", ts, id, pressed ? "DOWN" : "up");
+            fprintf(g_inputlog, "%s f%u switch %d %s\n", ts, g_coop_frame, id, pressed ? "DOWN" : "up");
             fflush(g_inputlog);
         }
     }

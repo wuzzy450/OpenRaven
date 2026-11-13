@@ -112,7 +112,9 @@ static SV void gun_aim(int g, float *x, float *y)
     // hybrid menu view shows only the left half: keep every cursor inside it (also the stored
     // aim, so a stick does not drift on into the hidden half)
     extern int raven_view;
-    if (raven_view == 1 && ax > 0.5f) { ax = 0.5f; if (!rio2pad_coop_mode()) g_aim[g][0] = 0.5f; }
+    // Coop: done in coop_sample_live instead, before the input is shared - the view changes when
+    // this PC draws, a frame apart on two PCs, so clamping here desynced them.
+    if (!rio2pad_coop_mode() && raven_view == 1 && ax > 0.5f) ax = g_aim[g][0] = 0.5f;
     *x = ax;
     *y = 1.0f - ay;
 }
@@ -200,6 +202,7 @@ static void coop_sample_live(struct coop_in *c)
         if (p == 0 && test_pressed()) b |= CI_TEST;
         if (coin_pulse(p)) b |= CI_COIN;
         c->bits[p] = b;
+        { extern int raven_view; if (raven_view == 1 && g_aim[p][0] > 0.5f) g_aim[p][0] = 0.5f; }   // hybrid menu: left half only
         c->aim[p][0] = g_aim[p][0];
         c->aim[p][1] = g_aim[p][1];
     }
