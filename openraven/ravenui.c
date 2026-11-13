@@ -28,7 +28,7 @@ extern const char *ravengfx_conf_path;
 extern float ravengfx_fps;
 
 // ---------------- settings list ----------------
-enum { T_CHOICE, T_NUM };
+enum { T_CHOICE, T_NUM, T_TEXT, T_INFO };   // T_TEXT: typed in; T_INFO: read-only status line, not saved
 typedef struct {
     const char *section, *label, *key;   // key in graphics.ini
     int type, live;                      // live: takes effect now; else on next launch
@@ -36,7 +36,7 @@ typedef struct {
     float lo, hi, step;                  // T_NUM
     const char *def;                     // value when graphics.ini doesn't set it
     const char *help;
-    char val[32];
+    char val[64];   // graphics.ini values are at most 63 characters (ravengfx.c kv)
 } item_t;
 
 static item_t items[] = {
@@ -85,7 +85,26 @@ static item_t items[] = {
  {"Input","Mouse sensitivity","mouse_sens",T_NUM,1,NULL,0.1f,5,0.1f,"1.0","Relative mode: 1.0 = one window width of mouse travel crosses the screen"},
  {"Overlay","Overlay size","ui_scale",T_CHOICE,1,"0.75|0.9|1.0|1.1|1.25|1.5|2.0",0,0,0,"1.0","Size of this menu. It always shrinks to fit the screen"},
  {"Cabinet","Free play","free_play",T_CHOICE,0,"0|1",0,0,0,"1",NULL},
+ {"Cabinet","Players","players",T_CHOICE,0,"2|4",0,0,0,"4","4 = the 4-player cabinet (pads 1-4 = players 1-4), shown on one screen. 2 = the original 2-player cabinet"},
+ {"Cabinet","4-player picture","wide4",T_CHOICE,0,"hybrid|1|0",0,0,0,"hybrid","hybrid: menus once, missions full screen, 16:9 cutscenes. 1: both cabinet screens side by side (32:9). 0: squeezed"},
  {"Cabinet","Skip boot checks","skip_boot",T_CHOICE,0,"0|1",0,0,0,"1","Skip file test + gun calibration"},
+ {"Online coop","Mode","coop",T_CHOICE,0,"off|host|join",0,0,0,"off","host: this PC opens a session. join: connect to the host address below. Save, then restart the game on every PC to start"},
+ {"Online coop","Host address","coop_address",T_TEXT,0,NULL,0,0,0,"","Join only: the host's internet or home-network address, e.g. 203.0.113.5 or 192.168.1.20:27500. Select this row and type; Backspace deletes"},
+ {"Online coop","Players","coop_players",T_CHOICE,0,"2|3|4",0,0,0,"2","Host only: number of PCs in the session, this one included. The game starts when all are in. Joiners copy the host's players and cabinet by themselves"},
+ {"Online coop","Port","coop_port",T_CHOICE,0,"27500|27501|27502|27503|27504|27505",0,0,0,"27500","UDP port. Host: the one port the router must pass to this PC. Joiners: the same number as the host (or type it after the address, e.g. 203.0.113.5:27501)"},
+ {"Online coop","Input delay","coop_delay",T_CHOICE,0,"1|2|3|4|5|6",0,0,0,"3","Host only: frames from a button press to the game reacting, so every PC has it in time. 1-2 at home, 3-4 over the internet"},
+ {"Online coop","Auto port forwarding","coop_upnp",T_CHOICE,0,"0|1",0,0,0,"1","Host only: ask the router to open the port by itself (UPnP). If that fails, the status below says which port to forward"},
+ {"Status","Session","#session",T_INFO,0,NULL,0,0,0,"",NULL},
+ {"Status","Router","#router",T_INFO,0,NULL,0,0,0,"",NULL},
+ {"Status","Join at home (same router)","#localip",T_INFO,0,NULL,0,0,0,"",NULL},
+ {"Status","Join over the internet","#joinat",T_INFO,0,NULL,0,0,0,"",NULL},
+ {"Browser stream","Browser stream","stream",T_CHOICE,0,"0|1",0,0,0,"0","Only this PC needs the game: friends open the link below in a web browser, see and hear the game, and play as players 2-4 with their mouse, keyboard or pad. Not together with online coop Mode"},
+ {"Browser stream","Stream port","stream_port",T_CHOICE,0,"27600|27601|27602|27603",0,0,0,"27600","TCP port of the stream page. Over the internet the router must pass this TCP port to this PC"},
+ {"Browser stream","Stream quality","stream_kbps",T_CHOICE,0,"3000|5000|8000|12000",0,0,0,"8000","Video bit rate in kbit/s. Lower it if friends' picture stutters (slow internet)"},
+ {"Browser stream","Video encoder","stream_encoder",T_CHOICE,0,"auto|nvidia|amd|intel|software",0,0,0,"auto","auto = the graphics card's own encoder (NVIDIA, AMD or Intel), the card running the game first; if it fails the next one is tried, finally software (uses the processor)"},
+ {"Browser stream","Encoder in use","#streamenc",T_INFO,0,NULL,0,0,0,"",NULL},
+ {"Browser stream","Link for friends at home","#streamlan",T_INFO,0,NULL,0,0,0,"",NULL},
+ {"Browser stream","Link over the internet","#streamwan",T_INFO,0,NULL,0,0,0,"",NULL},
 };
 #define NITEMS ((int)(sizeof items / sizeof *items))
 
@@ -103,6 +122,7 @@ static const struct { const char *name, *sections; } tabs[] = {
     {"Quality",       "Shadows|Effects"},
     {"Audio & Input", "Audio|Input|Overlay"},
     {"Cabinet",       "Cabinet"},
+    {"Coop",          "Online coop|Status|Browser stream"},
 };
 #define NTABS ((int)(sizeof tabs / sizeof *tabs))
 
@@ -151,6 +171,7 @@ static void apply_live(item_t *it);
 static void load_values(void)
 {
     for (int i = 0; i < NITEMS; i++) {
+        if (items[i].type == T_INFO) continue;
         const char *v = ravengfx_get(items[i].key);
         snprintf(items[i].val, sizeof items[i].val, "%s", v ? v : items[i].def);
         if (items[i].live && v) apply_live(&items[i]);   // only what graphics.ini sets
@@ -159,6 +180,7 @@ static void load_values(void)
 
 static void change(item_t *it, int dir)
 {
+    if (it->type == T_TEXT || it->type == T_INFO) return;   // typed (text_key), or read-only
     if (it->type == T_NUM) {
         float v = strtof(it->val, NULL) + dir * it->step;
         if (v < it->lo) v = it->lo;
@@ -303,8 +325,45 @@ static void button(float x, float y, float w, float h, const char *label, int ac
     hit(x, y, w, h, act, arg);
 }
 
+// Coop tab status lines. coopnet / coopupnp / streamweb live in rio2pad.so: found by name.
+static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+static const char *info_text(item_t *it)
+{
+    static char ip[64], b[320];
+    const char *(*cstat)(void) = dlsym(RTLD_DEFAULT, "coopnet_status"), *(*ustat)(void) = dlsym(RTLD_DEFAULT, "coopupnp_status");
+    int (*cact)(void) = dlsym(RTLD_DEFAULT, "coopnet_active"), (*sact)(void) = dlsym(RTLD_DEFAULT, "streamweb_active");
+    int (*lip)(char *, size_t) = dlsym(RTLD_DEFAULT, "coopupnp_local_ip");
+    const char *port = "27500";
+    for (int i = 0; i < NITEMS; i++) if (!strcmp(items[i].key, "coop_port") && items[i].val[0]) port = items[i].val;
+    if (!ip[0] && !(lip && lip(ip, sizeof ip))) snprintf(ip, sizeof ip, "no network");
+    if (!strcmp(it->key, "#session")) return cact && cact() && cstat ? cstat() : "Not in a coop session (set Mode, Save, restart)";
+    if (!strcmp(it->key, "#router")) {
+        const char *st = ustat ? ustat() : "";
+        if (st[0]) return st;
+        snprintf(b, sizeof b, "Hosting online: forward UDP port %s on the router to %s, or turn on Auto port forwarding", port, ip);
+        return b;
+    }
+    if (!strncmp(it->key, "#stream", 7)) {
+        const char *sp = "27600";
+        for (int i = 0; i < NITEMS; i++) if (!strcmp(items[i].key, "stream_port") && items[i].val[0]) sp = items[i].val;
+        if (!sact || !sact()) { snprintf(b, sizeof b, "Off (turn on Browser stream, Save, restart)"); return b; }
+        extern const char *streamenc_status(void);
+        if (!strcmp(it->key, "#streamenc")) snprintf(b, sizeof b, "%s", streamenc_status());
+        else if (!strcmp(it->key, "#streamlan")) snprintf(b, sizeof b, "http://%s:%s", ip, sp);
+        else snprintf(b, sizeof b, "http://<your public IPv4>:%s  - find it at https://www.whatismyip.com/ ; forward TCP port %s", sp, sp);
+        return b;
+    }
+    if (!strcmp(it->key, "#joinat")) {
+        snprintf(b, sizeof b, "your public IPv4:%s  - find your public IPv4 at https://www.whatismyip.com/", port);
+        return b;
+    }
+    snprintf(b, sizeof b, "%s:%s", ip, port);
+    return b;
+}
 static const char *shown(item_t *it, char *b)
 {
+    if (it->type == T_INFO) return info_text(it);
+    if (it->type == T_TEXT) return it->val[0] ? it->val : "(select and type)";
     if (it->type == T_CHOICE && (!strcmp(it->choices, "0|1"))) return atoi(it->val) ? "On" : "Off";
     snprintf(b, 40, "%s", it->val); return b;
 }
@@ -355,6 +414,17 @@ static void build_panel(void)
         if (sel) box(CT_X, y + 2, SB_X - 8 - CT_X, RH - 4, RGBA(34, 62, 50, 240));
         hit(CT_X, y, SB_X - 8 - CT_X, RH, H_ROW, r);
         text(CT_X + 24, y + 8, it->label, sel ? RGB(255, 255, 255) : RGB(200, 205, 210));
+        if (it->type == T_INFO) {   // status line: plain text, the whole width (full text in the footer when selected)
+            text(VAL_X - 120, y + 8, shown(it, b), RGB(255, 230, 140));
+            continue;
+        }
+        if (it->type == T_TEXT) {
+            char t[80];
+            snprintf(t, sizeof t, "%s%s", it->val[0] || !sel ? shown(it, b) : "", sel && ((int)(now_s() * 2) & 1) ? "_" : "");
+            box(VAL_X, y + 4, VAL_W + 120, RH - 8, RGBA(14, 20, 28, 255));
+            text(VAL_X + 10, y + 8, t, it->val[0] ? RGB(255, 230, 140) : RGB(115, 120, 125));
+            continue;
+        }
         button(VAL_X, y + 4, 36, RH - 8, "<", H_DEC, r);
         button(VAL_X + VAL_W - 36, y + 4, 36, RH - 8, ">", H_INC, r);
         const char *v = shown(it, b);
@@ -376,7 +446,8 @@ static void build_panel(void)
 
     float fy = PH - 128;                                    // footer
     box(24, fy, PW - 48, 1, RGBA(60, 80, 90, 255));
-    const char *h = ui_sel >= 0 && rows[ui_sel].item >= 0 ? items[rows[ui_sel].item].help : NULL;
+    item_t *si = ui_sel >= 0 && rows[ui_sel].item >= 0 ? &items[rows[ui_sel].item] : NULL;
+    const char *h = !si ? NULL : si->type == T_INFO ? info_text(si) : si->help;
     if (h) wrapped(28, fy + 12, PW - 56, h, RGB(170, 175, 180), 2);
     float by = PH - 60;
     if (ui_msg[0]) text(28, by + 8, ui_msg, RGB(140, 230, 160));
@@ -463,6 +534,20 @@ enum { XI_RAWBUTTONPRESS = 15, XI_RAWBUTTONRELEASE = 16 };
 // Keys come from XQueryKeymap and the pointer from XQueryPointer on our own X connection; clicks
 // and the wheel come from XInput2 raw events on the root window, which arrive even while the
 // game holds the pointer. Nothing here touches the game's own event loop.
+// Typing into a T_TEXT row (the coop host address). c = character, 8 = backspace.
+static void text_key(int c)
+{
+    pthread_mutex_lock(&ui_lock);
+    item_t *it = ui_open && ui_sel >= 0 && rows[ui_sel].item >= 0 ? &items[rows[ui_sel].item] : NULL;
+    if (it && it->type == T_TEXT) {
+        size_t n = strlen(it->val);
+        if (c == 8) { if (n) it->val[n - 1] = 0; }
+        else if (n + 1 < sizeof it->val && c > ' ' && c < 127) { it->val[n] = (char)c; it->val[n + 1] = 0; }
+        ui_dirty = 1; ui_restart = 1;
+    }
+    pthread_mutex_unlock(&ui_lock);
+}
+
 static void *key_thread(void *a)
 {
     (void)a;
@@ -472,6 +557,7 @@ static void *key_thread(void *a)
     XS(XOpenDisplay); XS(XQueryKeymap); XS(XKeysymToKeycode); XS(XStringToKeysym); XS(XQueryPointer);
     XS(XGetInputFocus); XS(XTranslateCoordinates); XS(XQueryExtension); XS(XPending); XS(XNextEvent);
     XS(XGetEventData); XS(XFreeEventData); XS(XFlush); XS(XDefaultRootWindow);
+    KeySym (*pXkb)(Display *, KeyCode, int, int) = (KeySym (*)(Display *, KeyCode, int, int))dlsym(x, "XkbKeycodeToKeysym");
 #undef XS
     Display *d = NULL;
     for (int i = 0; i < 100 && !(d = pXOpenDisplay(NULL)); i++) usleep(200000);
@@ -515,6 +601,15 @@ static void *key_thread(void *a)
             if (down && !was) { ui_key(k); held[i] = now + 0.4; }
             else if (down && i >= 1 && i <= 4 && now > held[i]) { ui_key(k); held[i] = now + 0.08; }   // auto-repeat
         }
+        // Typing into a T_TEXT row (the coop host address): newly pressed keys -> characters.
+        if (ui_open && ui_sel >= 0 && rows[ui_sel].item >= 0 && items[rows[ui_sel].item].type == T_TEXT && pXkb)
+            for (int c = 8; c < 256; c++) {
+                int down = (km[c >> 3] >> (c & 7)) & 1, was = (prev[c >> 3] >> (c & 7)) & 1;
+                if (!down || was) continue;
+                KeySym ks = pXkb(d, (KeyCode)c, 0, shift);
+                if (ks == 0xff08) text_key(8);                       // BackSpace
+                else if (ks > ' ' && ks < 127) text_key((int)ks);
+            }
         memcpy(prev, km, 32);
 
         if (!ui_open) {
@@ -678,7 +773,10 @@ static void draw_image(int sw, int sh, int x, int y, float scale)
 void ravengfx_overlay_draw(int sw, int sh)
 {
     if (sw <= 0 || sh <= 0) return;
-    if (!ui_open && !show_fps) return;
+    static const char *(*notice)(void); static int looked;   // coopnet.c (rio2pad.so): desync, a PC gone
+    if (!looked) { looked = 1; notice = (const char *(*)(void))dlsym(RTLD_DEFAULT, "coopnet_notice"); }
+    const char *cn = notice ? notice() : NULL;
+    if (!ui_open && !show_fps && !cn) return;
     if (gl_ok < 0) gl_ok = gl_init();
     if (!gl_ok) return;
     pthread_mutex_lock(&ui_lock);
@@ -698,6 +796,12 @@ void ravengfx_overlay_draw(int sw, int sh)
         canvas(SC(text_w(b) + 16), SC(FONT_H + 8));
         box(0, 0, text_w(b) + 16, FONT_H + 8, RGBA(0, 0, 0, 150)); text(8, 4, b, RGB(140, 230, 160));
         draw_image(sw, sh, sw - pw - SC(12), SC(12), 1);
+    }
+    if (cn && !ui_open) {   // coop message (desync, a PC gone): top middle, for a few seconds
+        S = fminf(sw / 1920.0f, sh / 1080.0f) * 1.3f; if (S < 0.7f) S = 0.7f;
+        canvas(SC(text_w(cn) + 32), SC(FONT_H + 20));
+        box(0, 0, text_w(cn) + 32, FONT_H + 20, RGBA(90, 20, 20, 210)); text(16, 10, cn, RGB(255, 235, 220));
+        draw_image(sw, sh, (sw - pw) / 2, SC(60), 1);
     }
     pthread_mutex_unlock(&ui_lock);
 }

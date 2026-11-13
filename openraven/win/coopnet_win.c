@@ -141,8 +141,10 @@ static void status(const char *fmt, ...)
     raven_log("[coop] %s\n", g_status);
 }
 
-// Fingerprint of the loader file and the game's code as loaded (0x400000 up to the data segment).
-// Different versions would play differently, so the host only lets in PCs with the same one.
+// Fingerprint of the game file and the cabinet type. Different versions would play differently, so the
+// host only lets in PCs with the same one. The Linux version (openraven/coopnet.c) hashes exactly the
+// same, so Linux and Windows PCs can play together (the loader itself is covered by PROTO).
+char raven_game_path[MAX_PATH];   // main.c
 static uint64_t fnv(uint64_t h, const unsigned char *p, size_t n)
 {
     while (n--) { h ^= *p++; h *= 0x100000001b3ull; }
@@ -151,19 +153,12 @@ static uint64_t fnv(uint64_t h, const unsigned char *p, size_t n)
 static uint64_t files_fingerprint(void)
 {
     uint64_t h = 0xcbf29ce484222325ull;
-    char path[MAX_PATH];
-    GetModuleFileNameA(NULL, path, sizeof path);
-    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    HANDLE f = CreateFileA(raven_game_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
     if (f != INVALID_HANDLE_VALUE) {
         static unsigned char buf[65536];
         DWORD n;
         while (ReadFile(f, buf, sizeof buf, &n, NULL) && n) h = fnv(h, buf, n);
         CloseHandle(f);
-    }
-    for (uintptr_t a = 0x400000; a < 0x1661000; a += 0x1000) {
-        MEMORY_BASIC_INFORMATION mi;
-        if (VirtualQuery((void *)a, &mi, sizeof mi) && mi.State == MEM_COMMIT && !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
-            h = fnv(h, (const unsigned char *)a, 0x1000);
     }
     h = fnv(h, (const unsigned char *)0x1800e60, 4);   // cabinet type: 2- and 4-player copies play differently
     return h;

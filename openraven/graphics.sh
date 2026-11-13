@@ -23,6 +23,29 @@ export HALO_VOLUME="${HALO_VOLUME:-$(gfx volume 100%)}"
 [ -z "$RIO2PAD_MOUSESENS" ] && export RIO2PAD_MOUSESENS="$(gfx mouse_sens 1.0)"
 [ -z "$RIO2PAD_FREEPLAY" ] && [ "$(gfx free_play 1)" = 0 ] && export RIO2PAD_FREEPLAY=0
 [ -z "$RIO2PAD_SKIPBOOT" ] && export RIO2PAD_SKIPBOOT="$(gfx skip_boot 1)"
+# Cabinet: players = 4 (default) is the 4-player cabinet, shown on one screen in the hybrid picture
+# (menus once, missions full screen, 16:9 cutscenes); players = 2 is the original 2-player cabinet.
+# wide4 = hybrid (default) | 1 (both cabinet screens side by side, 32:9) | 0 (squeezed).
+[ -z "$RIO2PAD_PLAYERS" ] && export RIO2PAD_PLAYERS="$(gfx players 4)"
+[ -z "$RAVEN_WIDE4" ] && export RAVEN_WIDE4="$(gfx wide4 hybrid)"
+# Online coop (F1 Coop tab): coop = off|host|join, coop_address = the host to join. Env vars win.
+if [ -z "$RAVEN_COOP" ]; then
+  case "$(gfx coop off)" in
+    host) export RAVEN_COOP=host;;
+    join) A="$(gfx coop_address '')"; if [ -n "$A" ]; then export RAVEN_COOP="join:$A"; else echo "[coop] Coop tab says join, but no host address is set: coop off"; fi;;
+  esac
+  if [ -n "$RAVEN_COOP" ]; then
+    [ -z "$RAVEN_COOP_PLAYERS" ] && export RAVEN_COOP_PLAYERS="$(gfx coop_players 2)"
+    [ -z "$RAVEN_COOP_PORT" ] && export RAVEN_COOP_PORT="$(gfx coop_port 27500)"
+    [ -z "$RAVEN_COOP_DELAY" ] && export RAVEN_COOP_DELAY="$(gfx coop_delay 3)"
+    [ -z "$RAVEN_COOP_UPNP" ] && export RAVEN_COOP_UPNP="$(gfx coop_upnp 1)"
+  fi
+fi
+# Browser stream (F1 Coop tab): friends watch and play in a web browser.
+[ -z "$RAVEN_STREAM" ] && export RAVEN_STREAM="$(gfx stream 0)"
+[ -z "$RAVEN_STREAM_PORT" ] && export RAVEN_STREAM_PORT="$(gfx stream_port 27600)"
+[ -z "$RAVEN_STREAM_KBPS" ] && export RAVEN_STREAM_KBPS="$(gfx stream_kbps 8000)"
+[ -z "$RAVEN_STREAM_ENCODER" ] && export RAVEN_STREAM_ENCODER="$(gfx stream_encoder auto)"
 for v in RAVENGFX_UISCRIPT RAVENGFX_UIKEY RAVENGFX_NOUI; do
   [ -n "${!v}" ] && GFX_BWRAP+=(--setenv "$v" "${!v}")
 done

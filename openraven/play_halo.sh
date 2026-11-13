@@ -82,6 +82,32 @@ if alsa_plugin pulse && [ -n "$PULSE_SERVER" ]; then
   fi
 fi
 echo "[OpenRaven] audio: $(basename "$ASOUND_CONF")"
+# Browser stream: friends hear the game's own sound. The surround mixes get a "tee" (ALSA file plugin)
+# that copies the game's sound, as 48 kHz 16-bit stereo, into a pipe that rio2pad.so (streamweb.c) reads.
+if [ "${RAVEN_STREAM:-0}" = 1 ]; then
+  TAP_PIPE="$WS/pm/g7/dump/stream_audio.pcm"
+  rm -f "$TAP_PIPE"; mkfifo "$TAP_PIPE"
+  SLAVE=$(sed -n '/surround51/,/}/s/.*slave[ .{]*pcm "\([a-z_]*\)".*/\1/p' "$ASOUND_CONF" | head -1)
+  STREAM_CONF="$OUT/run_logs/stream_asound.conf"
+  sed "s/\"$SLAVE\"/\"halo_streamtap\"/" "$ASOUND_CONF" > "$STREAM_CONF"
+  cat >> "$STREAM_CONF" <<EOT
+
+# added by play_halo.sh for the browser stream
+pcm.halo_streamtap {
+    type plug
+    slave { pcm "halo_streamfile" format S16_LE rate 48000 channels 2 }
+}
+pcm.halo_streamfile {
+    type file
+    slave.pcm "$SLAVE"
+    file "/pm/g7/dump/stream_audio.pcm"
+    format "raw"
+}
+EOT
+  ASOUND_CONF="$STREAM_CONF"
+  export RAVEN_STREAM_AUDIO=/pm/g7/dump/stream_audio.pcm
+  echo "[OpenRaven] browser stream: game sound copied through $(basename "$STREAM_CONF") (slave $SLAVE)"
+fi
 
 # Boot straight to attract: skip the file test and gun calibration. RIO2PAD_SKIPBOOT=0 shows them.
 # Everything the game and our hooks print goes to run_logs/last_play.log (screen changes included).

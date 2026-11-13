@@ -25,6 +25,7 @@ int ravenhdr_on(void);
 static int tracing;                       // 1 while the trace frame is being logged
 static long ndraw, ndraw_seg;
 static GLuint cur_prog, cur_fbo;
+static float g_last_m[16]; static int g_last_tr;   // last matrix set (hybrid 4P: the 2D item's)
 
 static void *gpa(const char *n){
     static void *(*g)(const char *);
@@ -140,6 +141,7 @@ static void w_glUseProgram(GLuint p){
 }
 static void w_glUniformMatrix4fv(GLint loc, GLsizei n, GLboolean tr, const float *m){
     r_glUniformMatrix4fv(loc, n, tr, m);
+    if (n >= 1 && m) { memcpy(g_last_m, m, 64); g_last_tr = tr; }   // hybrid 4P: the 2D item's matrix
     if (fsr && n == 1 && !tr) ravenfsr_matrix(loc, m);
     if (!tracing || !cur_prog) return;
     const char *nm = uni_name(cur_prog, loc);
@@ -152,10 +154,130 @@ static void w_glUniform1i(GLint loc, GLint v){
     r_glUniform1i(loc, v);
     if (tracing && cur_prog) fprintf(stderr, "[gltrace]   int %s = %d\n", uni_name(cur_prog, loc), v);
 }
-static void w_glDrawElements(GLenum m, GLsizei c, GLenum t, const void *i){ if (fg) ravenfg_draw(cur_prog, cur_fbo); if (fsr && ravenfsr_draw()) return; r_glDrawElements(m,c,t,i); ndraw++; ndraw_seg++; }
-static void w_glDrawArrays(GLenum m, GLint f, GLsizei c){ if (fg) ravenfg_draw(cur_prog, cur_fbo); if (fsr && ravenfsr_draw()) return; r_glDrawArrays(m,f,c); ndraw++; ndraw_seg++; }
-static void w_glDrawElementsInstanced(GLenum m, GLsizei c, GLenum t, const void *i, GLsizei n){ if (fg) ravenfg_draw(cur_prog, cur_fbo); if (fsr && ravenfsr_draw()) return; r_glDrawElementsInstanced(m,c,t,i,n); ndraw++; ndraw_seg++; }
-static void w_glDrawRangeElements(GLenum m, GLuint a, GLuint b, GLsizei c, GLenum t, const void *i){ if (fg) ravenfg_draw(cur_prog, cur_fbo); if (fsr && ravenfsr_draw()) return; r_glDrawRangeElements(m,a,b,c,t,i); ndraw++; ndraw_seg++; }
+// ---- hybrid 4-player picture (RAVEN_WIDE4=hybrid, raven_view in ravengfx.c), as win/gl_hooks.c ----
+// The game's 2D layer (draws to the screen after the 3D picture) is authored for the cabinet's 32:9
+// screen. Per view: 1 menu - viewport twice as wide, so the left cabinet screen fills the screen once;
+// 4 mission select - the middle 32:9 band; 2 mission - each item placed whole (HUD bars pinned to the
+// top/bottom edges, damage tint full screen, crosshairs and the rest following their centre);
+// 3 movie - overlay text drawn once like the menu.
+extern int raven_view;
+extern volatile int raven_shadow_seen;
+extern int ravengfx_res_w, ravengfx_res_h;
+static GLint g_vp[4];
+static int g_screen_draws;               // draws to the screen this frame (reset per frame)
+static int g_dm_first, g_dm_count, g_dm_indexed; static const void *g_dm_idx; static GLenum g_dm_itype;
+static int g_bbox_ok;
+static int band2d_begin(void){
+    if (raven_view < 1 || raven_view > 4 || cur_fbo != 0) return 0;
+    // the first two screen draws each frame are the 3D picture (composite + post pass); frames with
+    // only one picture draw go straight to the 2D program (36), which ends the picture
+    { static int on = -1, n; if (on < 0) on = getenv("RAVEN_BANDLOG") != NULL;   // debug: programs of the screen draws
+      if (on && n < 400) { n++; fprintf(stderr, "[band2d] screen draw %d prog %u vp %d %d %d %d count %d\n", g_screen_draws + 1, cur_prog, g_vp[0], g_vp[1], g_vp[2], g_vp[3], g_dm_count); } }
+    // Frames with only one picture draw go straight to the 2D program, which must end the picture
+    // (else the first HUD item, a join-panel portrait, is drawn full screen = "growing" panels). Its
+    // number depends on the driver (Windows: 36, Linux NVIDIA: 33): learn it as the program doing most
+    // of the screen draws after the picture. RAVEN_2DPROG=n sets it.
+    static GLuint prog2d; static unsigned cnt[64], seen;
+    if (!prog2d && getenv("RAVEN_2DPROG")) prog2d = (GLuint)atoi(getenv("RAVEN_2DPROG"));
+    if (!prog2d && g_screen_draws >= 2 && cur_prog && cur_prog < 64 && ++cnt[cur_prog] > 300 && ++seen) {
+        prog2d = cur_prog;
+        fprintf(stderr, "[band2d] the game's 2D program is %u\n", prog2d);
+    }
+    if (prog2d && cur_prog == prog2d) g_screen_draws = 99;
+    if (++g_screen_draws <= 2) return 0;
+    int W = ravengfx_res_w, H = ravengfx_res_h;
+    if (g_vp[0] != 0 || g_vp[1] != 0 || g_vp[2] != W || g_vp[3] != H) return 0;
+    return W * 9 / 32 < H;
+}
+// Bounding box of a 2D draw's positions (attribute 0, floats; client arrays or buffer objects).
+static int draw_bbox(float *x0, float *y0, float *x1, float *y1){
+    static void (*gva)(GLuint, GLenum, GLint *); static void (*gvp)(GLuint, GLenum, void **);
+    static void (*gbs)(GLenum, intptr_t, intptr_t, void *); static void (*bb)(GLenum, GLuint); static void (*gi)(GLenum, GLint *);
+    if (!gva) { gva = gpa("glGetVertexAttribiv"); gvp = gpa("glGetVertexAttribPointerv"); gbs = gpa("glGetBufferSubData"); bb = gpa("glBindBuffer"); gi = gpa("glGetIntegerv"); }
+    GLint en = 0, buf = 1, sz = 0, ty = 0, st = 0; void *ptr = NULL;
+    gva(0, 0x8622, &en);                                 // VERTEX_ATTRIB_ARRAY_ENABLED
+    if (!en) return 0;
+    gva(0, 0x889F, &buf); gva(0, 0x8623, &sz); gva(0, 0x8625, &ty); gva(0, 0x8624, &st);
+    gvp(0, 0x8645, &ptr);
+    if (ty != 0x1406 || sz < 2 || g_dm_count <= 0 || g_dm_count > 4096) return 0;
+    if (!buf && !ptr) return 0;
+    int stride = st ? st : sz * 4;
+    GLint eb = 0, pab = 0;
+    if (g_dm_indexed) gi(0x8895, &eb);                   // ELEMENT_ARRAY_BUFFER_BINDING
+    if (g_dm_indexed && !eb && !g_dm_idx) return 0;
+    static unsigned idxbuf[4096];
+    if (g_dm_indexed) {
+        int isz = g_dm_itype == 0x1403 ? 2 : g_dm_itype == 0x1405 ? 4 : 1;
+        static unsigned char raw[4096 * 4];
+        if (eb) gbs(0x8893, (intptr_t)g_dm_idx, (intptr_t)g_dm_count * isz, raw);
+        else memcpy(raw, g_dm_idx, (size_t)g_dm_count * isz);
+        for (int k = 0; k < g_dm_count; k++)
+            idxbuf[k] = isz == 2 ? ((unsigned short *)raw)[k] : isz == 4 ? ((unsigned *)raw)[k] : raw[k];
+    } else for (int k = 0; k < g_dm_count; k++) idxbuf[k] = (unsigned)(g_dm_first + k);
+    if (buf) { gi(0x8894, &pab); bb(0x8892, (GLuint)buf); }
+    *x0 = *y0 = 1e30f; *x1 = *y1 = -1e30f;
+    for (int k = 0; k < g_dm_count; k++) {
+        float qv[2]; const float *q = qv;
+        size_t off = (size_t)idxbuf[k] * stride;
+        if (buf) gbs(0x8892, (intptr_t)ptr + (intptr_t)off, 8, qv);
+        else q = (const float *)((const char *)ptr + off);
+        if (q[0] < *x0) *x0 = q[0];
+        if (q[0] > *x1) *x1 = q[0];
+        if (q[1] < *y0) *y0 = q[1];
+        if (q[1] > *y1) *y1 = q[1];
+    }
+    if (buf) bb(0x8892, (GLuint)pab);
+    return 1;
+}
+static int place_class_c(float *cc){      // 0 follow centre (*cc), 1 top, 2 bottom, 3 full screen
+    float x0, y0, x1, y1;
+    *cc = 0;
+    g_bbox_ok = draw_bbox(&x0, &y0, &x1, &y1);
+    if (!g_bbox_ok) return 0;
+    float w = x1 - x0, h = y1 - y0;
+    int xhair = w > 100 && w < 150 && h > 100 && h < 150 && w / h > 0.9f && w / h < 1.1f;
+    const float *m = g_last_m;
+    float lo = 1e9f, hi = -1e9f;
+    for (int c = 0; c < 4; c++) {
+        float x = c & 1 ? x1 : x0, y = c & 2 ? y1 : y0, cy, cw;
+        if (!g_last_tr) { cy = m[1] * x + m[5] * y + m[13]; cw = m[3] * x + m[7] * y + m[15]; }
+        else            { cy = m[4] * x + m[5] * y + m[7];  cw = m[12] * x + m[13] * y + m[15]; }
+        if (cw > 1e-6f || cw < -1e-6f) cy /= cw;
+        if (cy < lo) lo = cy;
+        if (cy > hi) hi = cy;
+    }
+    static float hud_top = -2, hud_bot;
+    if (hud_top < -1) {   // RAVEN_HUDSTRIP=top,bottom: ndc thresholds (default 0.6,-0.55)
+        const char *e = getenv("RAVEN_HUDSTRIP");
+        hud_top = 0.6f; hud_bot = -0.55f;
+        if (e) sscanf(e, "%f,%f", &hud_top, &hud_bot);
+    }
+    float c = (lo + hi) / 2;
+    if (hi - lo > 1.5f && c > -0.3f && c < 0.3f) return 3;   // damage tint
+    *cc = c < -1 ? -1 : c > 1 ? 1 : c;
+    if (xhair) return 0;                                      // crosshairs follow the aim
+    return c > hud_top ? 1 : c < hud_bot ? 2 : 0;
+}
+static void band2d_piece(void){
+    int W = ravengfx_res_w, H = ravengfx_res_h, bh = W * 9 / 32, t = (H - bh) / 2;
+    if (raven_view == 1) { r_glViewport(0, 0, 2 * W, H); return; }
+    if (raven_view == 4) { r_glViewport(g_vp[0], t + (int)((long long)g_vp[1] * bh / H), g_vp[2], (int)((long long)g_vp[3] * bh / H)); return; }
+    float c;
+    if (raven_view == 3) { if (place_class_c(&c) != 3 && g_bbox_ok) r_glViewport(0, 0, 2 * W, H); return; }
+    // mission: the aim spans the whole screen height (vert+ camera); y = t + c * (H - bh) / 2
+    switch (place_class_c(&c)) {
+    case 1: r_glViewport(0, H - bh, W, bh); break;
+    case 2: r_glViewport(0, 0, W, bh); break;
+    case 3: r_glViewport(0, 0, W, H); break;
+    default: { float d = c * (H - bh) / 2; r_glViewport(0, t + (int)(d < 0 ? d - 0.5f : d + 0.5f), W, bh); }
+    }
+}
+#define BAND2D(call) do { if (band2d_begin()) { band2d_piece(); call; r_glViewport(g_vp[0], g_vp[1], g_vp[2], g_vp[3]); } else call; } while (0)
+
+static void w_glDrawElements(GLenum m, GLsizei c, GLenum t, const void *i){ if (fg) ravenfg_draw(cur_prog, cur_fbo); if (fsr && ravenfsr_draw()) return; g_dm_count = c; g_dm_indexed = 1; g_dm_idx = i; g_dm_itype = t; BAND2D(r_glDrawElements(m,c,t,i)); ndraw++; ndraw_seg++; }
+static void w_glDrawArrays(GLenum m, GLint f, GLsizei c){ if (fg) ravenfg_draw(cur_prog, cur_fbo); if (fsr && ravenfsr_draw()) return; g_dm_first = f; g_dm_count = c; g_dm_indexed = 0; BAND2D(r_glDrawArrays(m,f,c)); ndraw++; ndraw_seg++; }
+static void w_glDrawElementsInstanced(GLenum m, GLsizei c, GLenum t, const void *i, GLsizei n){ if (fg) ravenfg_draw(cur_prog, cur_fbo); if (fsr && ravenfsr_draw()) return; g_dm_count = c; g_dm_indexed = 1; g_dm_idx = i; g_dm_itype = t; BAND2D(r_glDrawElementsInstanced(m,c,t,i,n)); ndraw++; ndraw_seg++; }
+static void w_glDrawRangeElements(GLenum m, GLuint a, GLuint b, GLsizei c, GLenum t, const void *i){ if (fg) ravenfg_draw(cur_prog, cur_fbo); if (fsr && ravenfsr_draw()) return; g_dm_count = c; g_dm_indexed = 1; g_dm_idx = i; g_dm_itype = t; BAND2D(r_glDrawRangeElements(m,a,b,c,t,i)); ndraw++; ndraw_seg++; }
 static void w_glBlitFramebuffer(GLint a,GLint b,GLint c,GLint d,GLint e,GLint f,GLint g,GLint h,GLbitfield m,GLenum fl){
     r_glBlitFramebuffer(a,b,c,d,e,f,g,h,m,fl);
     if (tracing) fprintf(stderr, "[gltrace] blit %d,%d-%d,%d -> %d,%d-%d,%d mask 0x%x\n", a,b,c,d,e,f,g,h,m);
@@ -163,7 +285,10 @@ static void w_glBlitFramebuffer(GLint a,GLint b,GLint c,GLint d,GLint e,GLint f,
 static void w_glClearColor(float r, float g, float b, float a){ r_glClearColor(r,g,b,a); if (tracing) fprintf(stderr, "[gltrace]   clearcolor %g %g %g %g\n", r,g,b,a); }
 static void w_glClearBufferfv(GLenum bf, GLint i, const float *v){ r_glClearBufferfv(bf,i,v); if (tracing) fprintf(stderr, "[gltrace]   clearbuffer 0x%x %d = %g %g %g %g\n", bf, i, v[0], bf == 0x1800 ? v[1] : 0, bf == 0x1800 ? v[2] : 0, bf == 0x1800 ? v[3] : 0); }
 static void w_glClear(GLbitfield m){ r_glClear(m); if (tracing) fprintf(stderr, "[gltrace]   clear 0x%x\n", m); }
-static void w_glViewport(GLint x, GLint y, GLsizei w, GLsizei h){ r_glViewport(x,y,w,h); if (tracing) fprintf(stderr, "[gltrace]   viewport %d,%d %dx%d\n", x,y,w,h); }
+static void w_glViewport(GLint x, GLint y, GLsizei w, GLsizei h){
+    g_vp[0] = x; g_vp[1] = y; g_vp[2] = w; g_vp[3] = h;
+    if (w == 8192 && h == 8192) raven_shadow_seen = 1;   // mission shadow map (hybrid view: mission)
+    r_glViewport(x,y,w,h); if (tracing) fprintf(stderr, "[gltrace]   viewport %d,%d %dx%d\n", x,y,w,h); }
 static void w_glDrawBuffers(GLsizei n, const GLenum *b){
     r_glDrawBuffers(n, b);
     if (tracing) { fprintf(stderr, "[gltrace]   drawbuffers"); for (int i = 0; i < n; i++) fprintf(stderr, " 0x%x", b[i]); fprintf(stderr, "\n"); }
@@ -367,6 +492,7 @@ void ravengl_trace_frame(double t)     // called from the present hook, before t
         fprintf(stderr, "[gltrace] %d slots patched, trace at %.0fs\n", total, trace_at);
         return;
     }
+    g_screen_draws = 0;
     if (fsr) ravenfsr_frame_end();
     if (trace_at < 0 || done) return;
     if (tracing) { seg_end(); fprintf(stderr, "[gltrace] ==== end of frame, %ld draws\n", ndraw); tracing = 0; done = 1; return; }

@@ -35,7 +35,7 @@ static get_int_fn orig_int;
 static get_flt_fn orig_flt;
 
 #define MAXKV 256
-static struct { char key[64]; char val[32]; } kv[MAXKV];
+static struct { char key[64]; char val[64]; } kv[MAXKV];
 static int nkv;
 static FILE *keylog;
 static pthread_mutex_t loglock = PTHREAD_MUTEX_INITIALIZER;
@@ -137,6 +137,7 @@ static void load_conf(const char *path)
 
 static int render_w, render_h;
 int ravengfx_win_w, ravengfx_win_h;
+int ravengfx_res_w, ravengfx_res_h;   // the game's screen size (same as win_w/h here; the Windows name)
 // Our 14-byte jmp at VIDEO_SET_MODE also overwrites the first 5 body bytes (0x4fb739..0x4fb73d:
 // mov (%rdi),%eax; mov 4(%rdi),%edx). Calling VIDEO_SET_BODY directly jumped into the middle of the
 // jmp and crashed every boot, so run those two instructions from a copy and jump back to 0x4fb73e.
@@ -147,7 +148,7 @@ static int hook_set_mode(uint8_t *m)
     int *w = (int *)(m + 4), *h = (int *)(m + 8);
     fprintf(stderr, "[ravengfx] video mode %dx%d aspect %.4f alt %dx%d\n", *w, *h, *(float *)(m + 0xc),
             *(int *)(m + 0x18), *(int *)(m + 0x1c));
-    ravengfx_win_w = *w; ravengfx_win_h = *h;
+    ravengfx_win_w = ravengfx_res_w = *w; ravengfx_win_h = ravengfx_res_h = *h;
     // graphics.ini: RENDER_SCALE=1.25 (supersample relative to screen) or RENDER_SIZE=WxH; env wins.
     const char *rs = lookup("RENDER_SCALE"), *rz = lookup("RENDER_SIZE");
     if (render_w <= 0 && rz) sscanf(rz, "%dx%d", &render_w, &render_h);
@@ -217,13 +218,33 @@ static void capture(const char *path){
 #define PROJ_JMP 0x49346eUL
 #define PROJ_CONT 0x49287cUL
 __attribute__((used, visibility("hidden"))) uint64_t proj_ret = PROJ_CONT;
-static float proj_aspect, proj_fovk = 1.0f; static int proj_on;
+static float proj_aspect, proj_fovk = 1.0f; static int proj_on, proj_wide4, proj_hybrid;
+// Hybrid 4-player mode (RAVEN_WIDE4=hybrid, as win/ravengfx_win.c): the game runs at the screen's own
+// shape (16:9), where everything authored for the cabinet's 32:9 screen comes out squeezed. A view is
+// picked per frame (raven_view, read by ravengltrace.c and rio2pad.c):
+//  1 menu    - camera vert+; the menu's 2D layer drawn twice as wide (left cabinet screen fills the screen)
+//  2 mission - camera vert+, each 2D item placed (HUD bars at the edges, crosshairs follow the aim)
+//  3 movie   - the 16:9 cutscene files are played instead (fopen below)
+//  4 mission select - the 2D layer in the middle 32:9 band
+int raven_view = 0;
+volatile int raven_shadow_seen;   // ravengltrace.c: the 8192x8192 shadow pass ran (= mission)
+volatile int raven_movie_open;    // a .webm cutscene file is open
 __attribute__((used, visibility("hidden"))) void proj_fix(uint8_t *cam);
 void proj_fix(uint8_t *cam)
 {
     float *p00 = (float *)(cam + 0x170), *p11 = (float *)(cam + 0x184);
     if (!proj_on || *p00 <= 0 || *p11 <= 0) return;
     float shape = *p11 / *p00;
+    if (proj_hybrid && raven_view == 3) return;              // movies: cameras stay native
+    // 4-player cabinet: the camera is 32:9 (two screens). Keep the full width of view and show more
+    // above and below (RAVEN_WIDE4FIT: keep the height, cut the sides). The 16:9 cameras stay native.
+    if (proj_wide4) {
+        if (shape > 3.4f && shape < 3.7f && proj_aspect > 0) {
+            if (proj_wide4 == 2) *p00 = *p11 / proj_aspect; else *p11 = *p00 * proj_aspect;
+            *p00 /= proj_fovk; *p11 /= proj_fovk;
+        }
+        return;
+    }
     if (shape < 1.70f || shape > 1.85f) return;            // not the 16:9 camera (already fixed or other)
     if (proj_aspect > 16.0f / 9.0f) *p00 = *p11 / proj_aspect;
     else if (proj_aspect > 0) *p11 = *p00 * proj_aspect;
@@ -268,10 +289,120 @@ static void hook_proj(void)
 static void proj_update(void)
 {
     const char *hp = lookup("HOR_PLUS"), *fv = lookup("FOV_SCALE");
+    // Online coop: the host's camera settings (coopnet_preconnect), since they change every aim ray.
+    if (getenv("RAVEN_COOP_HORPLUS")) hp = getenv("RAVEN_COOP_HORPLUS");
+    if (getenv("RAVEN_COOP_FOV")) fv = getenv("RAVEN_COOP_FOV");
     proj_on = hp ? atoi(hp) != 0 : 1;                      // default on
     proj_fovk = fv && atof(fv) > 0.3 ? atof(fv) : 1.0f;
     if (ravengfx_win_h > 0) proj_aspect = (float)ravengfx_win_w / ravengfx_win_h;
     if (fabsf(proj_aspect - 16.0f / 9.0f) < 0.01f && proj_fovk == 1.0f) proj_on = 0;
+    const char *pl = getenv("RIO2PAD_PLAYERS");
+    proj_wide4 = pl && atoi(pl) >= 3 ? (getenv("RAVEN_WIDE4FIT") ? 2 : 1) : 0;
+    if (proj_wide4 && fabsf(proj_aspect - 32.0f / 9.0f) > 0.05f) proj_on = 1;
+    const char *w4 = getenv("RAVEN_WIDE4");
+    int hy = proj_wide4 && w4 && !strcmp(w4, "hybrid") && proj_aspect < 3.3f;
+    if (hy && !proj_hybrid) raven_view = 1;   // start in the menus
+    if (!hy) raven_view = 0;
+    proj_hybrid = hy;
+}
+
+// For the coop host's T_SETUP answer (coopnet.c): the settings that shape the camera.
+void ravengfx_coop_camera(float *fovk, int *horplus)
+{
+    const char *hp = lookup("HOR_PLUS"), *fv = lookup("FOV_SCALE");
+    *horplus = hp ? atoi(hp) != 0 : 1;
+    *fovk = fv && atof(fv) > 0.3 ? (float)atof(fv) : 1.0f;
+}
+
+// Script conditions (0x4ab530 = set(ctx, name), 0x4ab8a0 = the other half). The hybrid view watches
+// them to know when the mission select screen is up; RAVEN_CONDLOG=1 logs every name.
+typedef long (*cond_fn)(int, const char *);
+static cond_fn cond_a_orig, cond_b_orig;
+static void cond_seen(char k, int ctx, const char *n)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("RAVEN_CONDLOG") != NULL;
+    if (!on || !n) return;
+    static char last[64]; static char lk;
+    if (lk != k || strncmp(last, n, 63)) { snprintf(last, sizeof last, "%s", n); lk = k; fprintf(stderr, "[cond] %c %d %.60s\n", k, ctx, n); }
+}
+static volatile int g_missionsel;
+static long cond_a(int ctx, const char *n)
+{
+    cond_seen('A', ctx, n);
+    if (n) {
+        if (!strcmp(n, "GAMESEL_CHAPTER")) g_missionsel = 1;
+        else if (!strcmp(n, "GAMESEL_DONE") || !strcmp(n, "BACK") || !strcmp(n, "SCENE_START_game_select2") || !strcmp(n, "MIN_LOAD_DONE")) g_missionsel = 0;
+    }
+    return cond_a_orig(ctx, n);
+}
+static long cond_b(int ctx, const char *n) { cond_seen('B', ctx, n); return cond_b_orig(ctx, n); }
+static void *hook(uint64_t at, const uint8_t *pro, size_t n, void *to);
+static void hook_cond(void)
+{
+    static const uint8_t pa[] = {0x41,0x54,0x55,0x53,0x48,0x83,0xec,0x10,0x64,0x48,0x8b,0x04,0x25,0x28,0x00,0x00,0x00};
+    static const uint8_t pb[] = {0x55,0x53,0x48,0x83,0xec,0x18,0x64,0x48,0x8b,0x04,0x25,0x28,0x00,0x00,0x00};
+    cond_a_orig = hook(0x4ab530, pa, sizeof pa, (void *)cond_a);
+    cond_b_orig = hook(0x4ab8a0, pb, sizeof pb, (void *)cond_b);
+    fprintf(stderr, "[ravengfx] condition hooks: %s %s\n", cond_a_orig ? "ok" : "no", cond_b_orig ? "ok" : "no");
+}
+static void hybrid_frame(void)
+{
+    static int run, want_last;
+    if (!proj_hybrid) { raven_shadow_seen = 0; return; }
+    int want = raven_movie_open ? 3 : raven_shadow_seen ? 2 : g_missionsel ? 4 : 1;
+    if (want == 2) g_missionsel = 0;
+    raven_shadow_seen = 0;
+    if (want == raven_view) { run = 0; return; }
+    if (want != want_last) run = 0;
+    want_last = want;
+    if (want != 3 && ++run < 8) return;   // a movie switches at once, the rest after 8 frames
+    run = 0;
+    raven_view = want;
+    fprintf(stderr, "[ravengfx] hybrid view: %s\n", want == 1 ? "menu (left half)" : want == 2 ? "mission (full, HUD band)" : want == 4 ? "mission select (32:9)" : "movie (full)");
+}
+
+// Hybrid mode: play the 16:9 cutscene movies the 2-player cabinet uses (X_1080.webm; X_wide.webm ->
+// X.webm) instead of the 32:9 ones. Also tells the view picker a movie is on screen.
+static FILE *movie_f;
+static int hybrid16(void) { static int on = -1; if (on < 0) { const char *e = getenv("RAVEN_WIDE4"), *pl = getenv("RIO2PAD_PLAYERS"); on = e && !strcmp(e, "hybrid") && pl && atoi(pl) >= 3; } return on; }
+FILE *fopen(const char *p, const char *m)
+{
+    static FILE *(*real)(const char *, const char *);
+    if (!real) real = dlsym(RTLD_NEXT, "fopen");
+    char buf[1024];
+    size_t n = p ? strlen(p) : 0;
+    if (p && hybrid16() && n > 10 && n + 8 < sizeof buf && strstr(p, "/webm/") && !strcmp(p + n - 5, ".webm") && strcmp(p + n - 10, "_1080.webm")) {
+        if (!strcmp(p + n - 10, "_wide.webm")) snprintf(buf, sizeof buf, "%.*s.webm", (int)(n - 10), p);
+        else snprintf(buf, sizeof buf, "%.*s_1080.webm", (int)(n - 5), p);
+        if (!access(buf, R_OK)) p = buf;
+    }
+    FILE *f = real(p, m);
+    if (f && p && strchr(m, 'r') && strstr(p, "/webm/")) { movie_f = f; raven_movie_open = 1; }
+    return f;
+}
+FILE *fopen64(const char *p, const char *m) { return fopen(p, m); }
+// The game's protection wrapper resolves libc itself, so the symbols above are not what the game
+// calls. Point the game's own import slots (same table the tanf hook scans) at them.
+static void hook_game_stdio(void)
+{
+    static int done;
+    if (done) return;
+    void *rf = dlsym(RTLD_NEXT, "fopen"), *rf64 = dlsym(RTLD_NEXT, "fopen64"), *rc = dlsym(RTLD_NEXT, "fclose");
+    int n = 0;
+    for (uint64_t *q = (uint64_t *)0x1690000UL; q < (uint64_t *)0x1692800UL; q++) {
+        if (rf && *q == (uint64_t)rf) { *q = (uint64_t)fopen; n++; }
+        else if (rf64 && *q == (uint64_t)rf64) { *q = (uint64_t)fopen64; n++; }
+        else if (rc && *q == (uint64_t)rc) { *q = (uint64_t)fclose; n++; }
+    }
+    if (n) { done = 1; fprintf(stderr, "[ravengfx] hybrid 4P: %d stdio slot(s) hooked for the 16:9 cutscenes\n", n); }
+}
+int fclose(FILE *f)
+{
+    static int (*real)(FILE *);
+    if (!real) real = dlsym(RTLD_NEXT, "fclose");
+    if (f && f == movie_f) { movie_f = NULL; raven_movie_open = 0; }
+    return real(f);
 }
 
 #define HORPLUS_SITE 0x493f0fUL
@@ -304,8 +435,11 @@ static void my_swap(void *dpy, unsigned long drawable)
         if (tan_log || horplus_k != 1.0f) hook_tanf();
         if (horplus_k != 1.0f) fprintf(stderr, "[ravengfx] Hor+ widening x%.3f\n", horplus_k);
     }
+    if (hybrid16()) hook_game_stdio();
+    hybrid_frame();
     ravengl_trace_frame(t - t0);
     if (frames % 30 == 0) proj_update();
+    { void streamenc_frame(int sw, int sh); streamenc_frame(ravengfx_win_w, ravengfx_win_h); }   // browser stream: game picture only
     if (ravengfx_overlay_draw) ravengfx_overlay_draw(ravengfx_win_w, ravengfx_win_h);
     if (shot_i < nshot && t - t0 >= shot_t[shot_i] && p_glReadPixels) {
         char path[512]; snprintf(path, sizeof path, "%s/shot_%g.ppm", shot_dir, shot_t[shot_i]);
@@ -431,9 +565,57 @@ static void set_steam_game(void *d, unsigned long w)
     fprintf(stderr, "[ravengfx] STEAM_GAME = %lu on window 0x%lx\n", v, w);
 }
 
+// The window can be larger than the game's picture (a coop joiner using the host's shape, the 32:9
+// 4-player picture, or a fullscreen window): the game draws into the bottom-left corner. Scale the
+// picture to fit and centre it, with black bars, before the swap. ravengfx_pic = where it ended up
+// (x, y from the top-left, w, h in window pixels), for the mouse aim in rio2pad.c.
+int ravengfx_pic[4];
+static void centre_picture(void)
+{
+    static void *(*cd)(void); static unsigned long (*cdr)(void); static void (*qd)(void *, unsigned long, int, unsigned *);
+    static void (*gf)(int, unsigned *), (*bf)(unsigned, unsigned), (*gt)(int, unsigned *), (*bt)(unsigned, unsigned);
+    static void (*ti)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *), (*ft)(unsigned, unsigned, unsigned, unsigned, int);
+    static void (*blit)(int, int, int, int, int, int, int, int, unsigned, unsigned), (*cc)(float, float, float, float), (*cl)(unsigned);
+    static void (*gi)(unsigned, int *); static unsigned char (*ie)(unsigned); static void (*dis)(unsigned), (*ena)(unsigned);
+    static unsigned fbo, tex; static int tw, th;
+    if (!cd) {
+        cd = glsym("glXGetCurrentDisplay"); cdr = glsym("glXGetCurrentDrawable"); qd = glsym("glXQueryDrawable");
+        gf = glsym("glGenFramebuffers"); bf = glsym("glBindFramebuffer"); gt = glsym("glGenTextures"); bt = glsym("glBindTexture");
+        ti = glsym("glTexImage2D"); ft = glsym("glFramebufferTexture2D"); blit = glsym("glBlitFramebuffer");
+        cc = glsym("glClearColor"); cl = glsym("glClear"); gi = glsym("glGetIntegerv"); ie = glsym("glIsEnabled");
+        dis = glsym("glDisable"); ena = glsym("glEnable");
+    }
+    int W = ravengfx_win_w, H = ravengfx_win_h;
+    if (!qd || !blit || W <= 0 || H <= 0 || !cd() || !cdr()) return;
+    unsigned ww = 0, wh = 0;
+    qd(cd(), cdr(), 0x801D, &ww); qd(cd(), cdr(), 0x801E, &wh);   // GLX_WIDTH, GLX_HEIGHT
+    if (!ww || !wh || ((int)ww == W && (int)wh == H)) { ravengfx_pic[0] = ravengfx_pic[1] = 0; ravengfx_pic[2] = ww; ravengfx_pic[3] = wh; return; }
+    int pw = (int)ww, ph = (int)((long long)ww * H / W);
+    if (ph > (int)wh) { ph = (int)wh; pw = (int)((long long)wh * W / H); }
+    int px = ((int)ww - pw) / 2, py = ((int)wh - ph) / 2;
+    ravengfx_pic[0] = px; ravengfx_pic[1] = py; ravengfx_pic[2] = pw; ravengfx_pic[3] = ph;
+    int rf, df, tx, sci = ie(0x0C11);
+    gi(0x8CAA, &rf); gi(0x8CA6, &df); gi(0x8069, &tx);
+    if (!fbo || tw != W || th != H) {
+        if (!fbo) { gf(1, &fbo); gt(1, &tex); }
+        bt(0x0DE1, tex); ti(0x0DE1, 0, 0x8058, W, H, 0, 0x1908, 0x1401, NULL); bt(0x0DE1, (unsigned)tx);
+        bf(0x8CA9, fbo); ft(0x8CA9, 0x8CE0, 0x0DE1, tex, 0);
+        tw = W; th = H;
+        fprintf(stderr, "[ravengfx] picture %dx%d centred in the %ux%u window at %d,%d (%dx%d)\n", W, H, ww, wh, px, py, pw, ph);
+    }
+    if (sci) dis(0x0C11);
+    bf(0x8CA8, 0); bf(0x8CA9, fbo);                         // copy the game's picture out of the corner
+    blit(0, 0, W, H, 0, 0, W, H, 0x4000, 0x2600);
+    bf(0x8CA9, 0); cc(0, 0, 0, 1); cl(0x4000);              // black bars
+    bf(0x8CA8, fbo);
+    blit(0, 0, W, H, px, (int)wh - py - ph, px + pw, (int)wh - py, 0x4000, 0x2601);
+    bf(0x8CA8, (unsigned)rf); bf(0x8CA9, (unsigned)df);
+    if (sci) ena(0x0C11);
+}
+
 // HDR = 1: ravenhdr.c presents through Vulkan HDR10 instead of the game's swap (else it falls back).
 int ravenhdr_present(void);
-static void present_or_hdr(void *ctx) { if (!ravenhdr_present()) ((void (*)(void *))PRESENT_FN)(ctx); }
+static void present_or_hdr(void *ctx) { if (!ravenhdr_present()) { centre_picture(); ((void (*)(void *))PRESENT_FN)(ctx); } }
 static void my_present(void *ctx)
 {
     my_swap(NULL, 0);                       // overlay + capture + FPS, before the real swap
@@ -537,6 +719,8 @@ __attribute__((constructor)) static void ravengfx_init(void)
 
     hook_present();
     hook_proj();
+    hook_cond();
+    proj_update();
     if (!getenv("RAVENGFX_NOUI")) ravenui_start();
 
     uint8_t *ja = (uint8_t *)ASPECT_LOCK_JA;

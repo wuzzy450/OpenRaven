@@ -220,6 +220,7 @@ int main(int argc, char **argv) {
     if (eg) snprintf(game, sizeof game, "%s", eg);
     if (eh) snprintf(halo, sizeof halo, "%s", eh);
     raven_log("game: %s\nhalo.so: %s\n", game, halo);
+    { extern char raven_game_path[MAX_PATH]; snprintf(raven_game_path, MAX_PATH, "%s", game); }   // coop fingerprint
     raven_log("settings: RAVEN_WINDOWED=%s RAVEN_SHOT_EVERY=%s (crt: %s)\n",
               raven_env("RAVEN_WINDOWED") ? raven_env("RAVEN_WINDOWED") : "-",
               raven_env("RAVEN_SHOT_EVERY") ? raven_env("RAVEN_SHOT_EVERY") : "-",

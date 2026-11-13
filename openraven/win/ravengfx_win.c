@@ -520,8 +520,11 @@ int ravengfx_args(char **argv, int argc) {
     const char *ca = raven_env("RAVEN_COOP_ASPECT");
     int aw, ah;
     if (ca && sscanf(ca, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0 && (long long)w * ah != (long long)h * aw) {
-        if ((long long)w * ah > (long long)h * aw) w = (int)((long long)h * aw / ah) & ~1;
-        else h = (int)((long long)w * ah / aw) & ~1;
+        // exactly the host's shape (a rounded 1066x600 for 16:9 was enough to desync): whole
+        // multiples of the reduced ratio, as large as fits
+        int a = aw, b = ah; while (b) { int t = a % b; a = b; b = t; }
+        int rw = aw / a, rh = ah / a, k = w / rw < h / rh ? w / rw : h / rh;
+        if (k > 0) { w = rw * k; h = rh * k; }
         raven_log("[ravengfx] coop: picture %dx%d, the host's shape %d:%d (black bars around it)\n", w, h, aw, ah);
     }
     ravengfx_res_w = w; ravengfx_res_h = h;
@@ -570,11 +573,14 @@ void ravengfx_install(void) {
     static const char *map[][2] = {{"skip_boot", "RIO2PAD_SKIPBOOT"}, {"free_play", "RIO2PAD_FREEPLAY"},
                                    {"stick_speed", "RIO2PAD_STICKSPEED"}, {"aim", "RIO2PAD_AIM"},
                                    {"mouse", "RIO2PAD_MOUSE"}, {"mouse_sens", "RIO2PAD_MOUSESENS"},
-                                   {"players", "RIO2PAD_PLAYERS"}};
+                                   {"players", "RIO2PAD_PLAYERS"}, {"wide4", "RAVEN_WIDE4"}};
     for (unsigned i = 0; i < sizeof map / sizeof *map; i++) {
         const char *v = lookup(map[i][0]);
         if (v && !raven_env(map[i][1])) SetEnvironmentVariableA(map[i][1], v);
     }
+    // Default cabinet: the 4-player cabinet in the hybrid picture (F1 Cabinet: Players 2 switches back).
+    if (!raven_env("RIO2PAD_PLAYERS")) SetEnvironmentVariableA("RIO2PAD_PLAYERS", "4");
+    if (!raven_env("RAVEN_WIDE4")) SetEnvironmentVariableA("RAVEN_WIDE4", "hybrid");
     // Coop tab (F1): coop = off|host|join, coop_address = host to join. Env vars (coop_*.bat) win.
     // Browser stream (F1 Coop tab): works without the coop Mode, so mapped on its own.
     static const char *smap[][2] = {{"stream", "RAVEN_STREAM"}, {"stream_port", "RAVEN_STREAM_PORT"}, {"stream_kbps", "RAVEN_STREAM_KBPS"}, {"stream_encoder", "RAVEN_STREAM_ENCODER"}};

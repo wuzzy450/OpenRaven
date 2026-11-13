@@ -8,7 +8,7 @@
 // Up to 4 pads: the Nth non-mouse /dev/input/js* device found is player N+1.
 //   Start or A = that player's START     Back = TEST (any pad)     Y = insert coin (only with RIO2PAD_FREEPLAY=0)
 //
-// Build: gcc -O2 -shared -fPIC -o rio2pad.so rio2pad.c -lpthread -ldl
+// Build: build.sh (rio2pad.c + coop.c + coopnet.c + coopupnp.c + streamweb.c -> rio2pad.so)
 // Env:   RIO2PAD_DEBUG=1      print button presses and pressed switch ids
 //        RIO2PAD_SWLOG=file   every 5 s, write each switch id the game polled (with counts)
 //        RIO2PAD_PROBE=id     hold switch <id> pressed 1 s out of every 4 s (to identify ids)
@@ -59,6 +59,7 @@ struct pad {
     volatile int btn[32];
     volatile int axis[8];
     volatile long long coin_t;   // ms timestamp of the last Y press (coin pulse start)
+    int sony;                    // PlayStation pad (hid-playstation / hid-sony): other button numbers
 };
 static struct pad g_pads[MAX_PADS] = {{-1}, {-1}, {-1}, {-1}};
 
@@ -66,7 +67,7 @@ static int g_debug, g_autostart, g_probe = -1, g_dumprec = -1;
 static int g_probe_list[64], g_probe_n;   // RIO2PAD_PROBELIST="delay,id,id,...": press each id in turn
 static time_t g_probe_t0;
 static int g_probe_step = 6;              // RIO2PAD_PROBESTEP=s
-static int g_coin_ids[MAX_PADS] = {570, 571, -1, -1};   // coin mech switch ids (probed: 570/571 add money)
+static int g_coin_ids[MAX_PADS] = {570, 571, 602, 603};   // coin mech switch ids (probed: 570/571 add money; 4-player cabinet: 2nd board = ids + 32)
 static volatile unsigned g_swcount[MAX_SW];
 static signed char g_swstate[MAX_SW];
 static FILE *g_inputlog;   // RIO2PAD_INPUTLOG=file: timestamped switch press/release edges
@@ -91,16 +92,38 @@ static long long now_ms(void)
 // ask twice in one poll: edges are worked out once per poll (calls < 3 ms apart share them).
 // RIO2PAD_GUNLEVEL=1 = old way.
 #define SW_DISPATCH_RET 0x4ad811UL
+// Gun switch ids -> player * 5 + role (role 2 trigger, 3 reload, 4 grenade; 0/1 unused), or -1.
+// 2-player cabinet: guns 1/2 = 793..802, 5 each. 4-player cabinet (type 9): 793..812 (P3/P4 = 803..812)
+// plus the 4-player board ids from the game's dispatcher table: board 1 = 586..596, board 2 = 618..628.
+static int g_players4;
+static void map_append_4p(void);
+static int gun_index(int id)
+{
+    if (id >= 793 && id <= 802) return id - 793;
+    if (g_players4 && id >= 803 && id <= 812) return id - 803 + 10;
+    if (!g_players4) return -1;
+    static const short m[][2] = {
+        {586, 0}, {587, 1}, {590, 2}, {592, 3}, {591, 4},        // player 1
+        {588, 5}, {589, 6}, {594, 7}, {596, 8}, {595, 9},        // player 2
+        {618, 10}, {619, 11}, {622, 12}, {624, 13}, {623, 14},   // player 3
+        {620, 15}, {621, 16}, {626, 17}, {628, 18}, {627, 19}};  // player 4
+    for (unsigned i = 0; i < sizeof m / sizeof *m; i++) if (m[i][0] == id) return m[i][1];
+    return -1;
+}
+static volatile unsigned g_coop_frame;
+static int g_coop_mode;            // 0 live, 1 record, 2 replay, 3 online (coopnet.c)
 static void gun_report(int id, int level, unsigned char *f)
 {
-    static int last[10], snap_p[10], snap_r[10], said;
-    static double snap_t[10];
+    static int last[20], snap_p[20], snap_r[20], said;
+    static double snap_t[20];
+    static unsigned snap_f[20];
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     double t = ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-    int k = id - 793;
+    int k = gun_index(id);
     if (!said) { said = 1; fprintf(stderr, "[rio2pad] gun buttons: edge + held reporting (RIO2PAD_GUNLEVEL=1 = old way)\n"); }
-    if (t - snap_t[k] >= 3.0) {
+    if (g_coop_mode ? snap_f[k] != g_coop_frame + 1 : t - snap_t[k] >= 3.0) {   // coop: once per game frame
+        snap_f[k] = g_coop_frame + 1;
         snap_p[k] = level && !last[k];
         snap_r[k] = !level && last[k];
         last[k] = level;
@@ -129,15 +152,36 @@ static volatile int g_mouse_btn[3]; // left fire, middle grenade, right reload
 // game never shows "gun missing" while a wireless pad is asleep.
 static int gun_connected(int g) { return g >= 0 && g < MAX_PADS; }
 
+// ravengfx.so (loaded after us) owns the picture state: raven_view (hybrid 4-player view, see
+// ravengfx.c) and the game resolution. Looked up by name; 0 while it does not exist.
+static int g_zero;
+static int *gfx_int(int **cache, const char *name)
+{
+    if (!*cache) { int *p = dlsym(RTLD_DEFAULT, name); if (!p) return &g_zero; *cache = p; }
+    return *cache;
+}
+static int *c_view, *c_resw, *c_resh;
+#define RAVEN_VIEW   (*gfx_int(&c_view, "raven_view"))
+#define GFX_RES_W    (*gfx_int(&c_resw, "ravengfx_res_w"))
+#define GFX_RES_H    (*gfx_int(&c_resh, "ravengfx_res_h"))
+
+static int g_coop_mode_get(void);
+static float g_coop_aim_get(int g, int k);
 static void gun_aim(int g, float *x, float *y)
 {
     if (!x || !y) return;
     if (!gun_connected(g)) { *x = *y = -1.0f; return; }   // -1,-1 = "not aiming at the screen"
-    *x = g_aim[g][0];
-    *y = 1.0f - g_aim[g][1];   // game's y runs bottom-to-top; ours (and the stick's) top-to-bottom
+    float ax = g_aim[g][0], ay = g_aim[g][1];
+    if (g_coop_mode_get()) { ax = g_coop_aim_get(g, 0); ay = g_coop_aim_get(g, 1); }
+    // hybrid menu view shows only the left half: keep every cursor inside it (also the stored aim,
+    // so a stick does not drift on into the hidden half)
+    if (RAVEN_VIEW == 1 && ax > 0.5f) { ax = 0.5f; if (!g_coop_mode_get()) g_aim[g][0] = 0.5f; }
+    *x = ax;
+    *y = 1.0f - ay;   // game's y runs bottom-to-top; ours (and the stick's) top-to-bottom
 }
 
-static int btn(int p, int b) { return g_pads[p].fd != -1 && g_pads[p].btn[b]; }
+static volatile int g_pads_muted;   // browser player connected + game window in the background
+static int btn(int p, int b) { return g_pads[p].fd != -1 && (!g_pads_muted || g_pads[p].fd == -3) && g_pads[p].btn[b]; }
 // Keyboard (game window focused, F1 menu closed), same keys as Windows: Enter/1 = P1 START,
 // 2 = P2 START, F2 = TEST, Space = P1 fire, R = P1 reload, G = P1 grenade, arrows = P1 aim.
 enum { KB_START1 = 1, KB_START2 = 2, KB_TEST = 4, KB_FIRE = 8, KB_RELOAD = 16, KB_GRENADE = 32,
@@ -187,10 +231,11 @@ static int in_continue(int p)
 
 // Shooting during the continue countdown speeds it up, so a held trigger at the moment of death
 // skipped straight to game over. Ignore the trigger until the trigger is let go after the countdown.
+static int in_trig(int p);
 static int trigger_pressed(int p)
 {
     static int block[MAX_PADS];
-    int down = (g_pads[p].fd != -1 && g_pads[p].axis[5] > 0) || (p == 0 && (g_mouse_btn[0] || (g_kb & KB_FIRE)));
+    int down = in_trig(p);
     if (getenv("RIO2PAD_CONTINUESHOOT")) return down;
     if (in_continue(p)) { block[p] = 1; return 0; }
     if (block[p] && down) return 0;   // still held from the countdown
@@ -204,6 +249,111 @@ static int test_pressed(void)
         if (btn(p, PAD_BACK)) return 1;
     return !!(g_kb & KB_TEST);
 }
+
+// ---- coop: one input snapshot per simulation frame, recorded, replayed or sent online ----
+// Same as win/rio2pad_win.c: RIO2PAD_RECORD=file writes every frame's snapshot, RIO2PAD_REPLAY=file
+// feeds it back, RAVEN_COOP=host|join:addr plays online (coopnet.c). In these modes sw_get / gun_aim
+// serve the snapshot taken at the frame start (coop.c calls rio2pad_coop_frame from the game's
+// frame-time update), so input only changes on frame boundaries.
+void coopnet_preconnect(void);
+#include "win/coop.h"
+enum { CI_START = 1, CI_TRIG = 2, CI_RELOAD = 4, CI_GREN = 8, CI_TEST = 16, CI_COIN = 32 };
+static struct coop_in g_ci;
+static FILE *g_coop_f;
+static const char REC_MAGIC[8] = "RVREC01";
+
+static int live_trig(int p)   { return (g_pads[p].fd != -1 && (!g_pads_muted || g_pads[p].fd == -3) && g_pads[p].axis[5] > 0) || (p == 0 && (g_mouse_btn[0] || (g_kb & KB_FIRE))); }
+static int live_reload(int p) { return btn(p, PAD_RB) || (p == 0 && (g_mouse_btn[2] || (g_kb & KB_RELOAD))); }
+static int live_gren(int p)   { return (g_pads[p].fd != -1 && (!g_pads_muted || g_pads[p].fd == -3) && g_pads[p].axis[2] > 0) || (p == 0 && (g_mouse_btn[1] || (g_kb & KB_GRENADE))); }
+
+static void coop_sample_live(struct coop_in *c)
+{
+    memset(c, 0, sizeof *c);
+    for (int p = 0; p < MAX_PADS; p++) {
+        uint8_t b = 0;
+        if (start_pressed(p) || (p == 0 && boot_start_pulse())) b |= CI_START;
+        if (live_trig(p)) b |= CI_TRIG;
+        if (live_reload(p)) b |= CI_RELOAD;
+        if (live_gren(p)) b |= CI_GREN;
+        if (p == 0 && test_pressed()) b |= CI_TEST;
+        if (coin_pulse(p)) b |= CI_COIN;
+        c->bits[p] = b;
+        c->aim[p][0] = g_aim[p][0];
+        c->aim[p][1] = g_aim[p][1];
+    }
+}
+
+int rio2pad_coop_mode(void) { return g_coop_mode; }
+static int g_coop_mode_get(void) { return g_coop_mode && g_coop_frame; }
+static float g_coop_aim_get(int g, int k) { return g_ci.aim[g][k]; }
+float rio2pad_coop_aim(int g, int k) { return g_ci.aim[g][k]; }
+unsigned rio2pad_coop_frame_no(void) { return g_coop_frame; }
+
+void rio2pad_coop_frame(unsigned frame)
+{
+    struct coop_in c;
+    if (g_players4) map_append_4p();
+    if (g_coop_mode == 2) {
+        unsigned f;
+        if (fread(&f, 4, 1, g_coop_f) == 1 && fread(&c, sizeof c, 1, g_coop_f) == 1) {
+            if (f != frame) fprintf(stderr, "[coop] replay frame mismatch: file %u, game %u\n", f, frame);
+        } else {
+            static int said;
+            if (!said++) fprintf(stderr, "[coop] replay file ended at frame %u, inputs released\n", frame);
+            memset(&c, 0, sizeof c);
+            for (int p = 0; p < MAX_PADS; p++) c.aim[p][0] = c.aim[p][1] = 0.5f;
+        }
+    } else if (g_coop_mode == 3) {   // online: this PC's first pad / mouse / keyboard is its player
+        coop_sample_live(&c);
+        coopnet_frame(frame, c.bits[0], c.aim[0][0], c.aim[0][1], &c);
+    } else {
+        coop_sample_live(&c);
+        if (g_coop_mode == 1) {
+            fwrite(&frame, 4, 1, g_coop_f);
+            fwrite(&c, sizeof c, 1, g_coop_f);
+            if ((frame & 63) == 0) fflush(g_coop_f);
+        }
+    }
+    g_ci = c;
+    g_coop_frame = frame;
+}
+
+static void coop_open(void)
+{
+    const char *rec = getenv("RIO2PAD_RECORD"), *rep = getenv("RIO2PAD_REPLAY");
+    coopnet_init();
+    if (coopnet_active()) { g_coop_mode = 3; return; }
+    if (rep) {
+        g_coop_f = fopen(rep, "rb");
+        char m[8];
+        if (!g_coop_f || fread(m, 8, 1, g_coop_f) != 1 || memcmp(m, REC_MAGIC, 8)) {
+            fprintf(stderr, "[coop] cannot replay %s (missing or not a recording)\n", rep);
+            if (g_coop_f) fclose(g_coop_f);
+            g_coop_f = NULL;
+            return;
+        }
+        g_coop_mode = 2;
+        fprintf(stderr, "[coop] replaying inputs from %s\n", rep);
+    } else if (rec) {
+        g_coop_f = fopen(rec, "wb");
+        if (!g_coop_f) { fprintf(stderr, "[coop] cannot write %s\n", rec); return; }
+        fwrite(REC_MAGIC, 8, 1, g_coop_f);
+        g_coop_mode = 1;
+        fprintf(stderr, "[coop] recording inputs to %s\n", rec);
+    }
+}
+
+// Inputs as the game hooks see them: the frame snapshot in coop modes, live otherwise.
+static int ci(int p, int bit) { return (g_ci.bits[p] & bit) != 0; }
+static int coop_on(void) { return g_coop_mode && g_coop_frame; }
+static int in_start(int p)  { return coop_on() ? ci(p, CI_START) : start_pressed(p) || (p == 0 && boot_start_pulse()); }
+static int in_trig(int p)   { return coop_on() ? ci(p, CI_TRIG) : live_trig(p); }
+static int in_reload(int p) { return coop_on() ? ci(p, CI_RELOAD) : live_reload(p); }
+static int in_gren(int p)   { return coop_on() ? ci(p, CI_GREN) : live_gren(p); }
+static int in_test(void)    { return coop_on() ? ci(0, CI_TEST) : test_pressed(); }
+static int in_coin(int p)   { return coop_on() ? ci(p, CI_COIN) : coin_pulse(p); }
+
+#define IRT_SET_CABTYPE_FN ((int (*)(int))IRT_SET_CABTYPE)
 
 static void *sw_get_hook(int id)
 {
@@ -221,8 +371,14 @@ static void *sw_get_hook(int id)
             fprintf(stderr, "\n");
         }
     }
+    // 4-player cabinet: the game never runs irt_systemSetCabinetType itself there, so the gun count
+    // (0x1f392d0) stays 0 and the per-frame gun poll (aim) does nothing. Run it once (patched: 4 guns).
+    if (g_players4 && *(volatile int *)0x1f392d0UL == 0) {
+        IRT_SET_CABTYPE_FN(10);
+        fprintf(stderr, "[rio2pad] 4-player cabinet: gun count set to %d\n", *(volatile int *)0x1f392d0UL);
+    }
     for (int i = 0; i < 4; i++)
-        if (G_START_IDS[i] && id == G_START_IDS[i]) pressed = start_pressed(i) || (i == 0 && boot_start_pulse());
+        if (G_START_IDS[i] && id == G_START_IDS[i]) pressed = in_start(i);
     // Gun cabinet (type 8) candidates, all driven from pad 1 while we narrow them down:
     // Button-test build: one candidate switch per pad-1 button.
     // Gun buttons, 5 per gun (gun 1 = 793..797, gun 2 = 798..802). Decoded from the type-8 remap
@@ -231,22 +387,22 @@ static void *sw_get_hook(int id)
     //   +3 -> logical 0x209+12p: reload button (handler 0x42c030, "gun%i_reload"/"reload_held")
     //   +4 -> logical 0x20a+12p: grenade (handler 0x42ef10, "gun%dGrenadeKick")
     //   +0/+1 have no physical record in sw_get and no gameplay handler; keep them released.
-    if (id >= 793 && id <= 802) {
-        int p = (id - 793) / 5, k = (id - 793) % 5;
+    if (gun_index(id) >= 0) {
+        int p = gun_index(id) / 5, k = gun_index(id) % 5;
         pressed = 0;
-        if (k == 2) pressed = trigger_pressed(p);                                       // RT
-        if (k == 3) pressed = btn(p, PAD_RB) || (p == 0 && (g_mouse_btn[2] || (g_kb & KB_RELOAD)));            // RB / right click = reload
-        if (k == 4) pressed = (g_pads[p].fd != -1 && g_pads[p].axis[2] > 0) || (p == 0 && (g_mouse_btn[1] || (g_kb & KB_GRENADE)));   // LT / middle = grenade
+        if (k == 2) pressed = trigger_pressed(p);   // RT / left click / Space
+        if (k == 3) pressed = in_reload(p);         // RB / right click / R
+        if (k == 4) pressed = in_gren(p);           // LT / middle click / G
     }
     // Player START in the gun cabinet: the type-8 remap sends 581 -> logical 0x24e and 582 -> 0x251,
     // and the game reads "Player N Start" as logical 0x24e + slot (gun 2 is slot 3). Same switch
     // also skips cutscenes and confirms calibration.
-    if (id == 581) pressed = start_pressed(0);
-    if (id == 582) pressed = start_pressed(1);
+    if (id == 581) pressed = in_start(0);
+    if (id == 582) pressed = in_start(1);
     for (int i = 0; i < 3; i++)
-        if (G_TEST_IDS[i] && id == G_TEST_IDS[i]) pressed = test_pressed();
+        if (G_TEST_IDS[i] && id == G_TEST_IDS[i]) pressed = in_test();
     for (int i = 0; i < MAX_PADS; i++)
-        if (g_coin_ids[i] >= 0 && id == g_coin_ids[i]) pressed = coin_pulse(i);
+        if (g_coin_ids[i] >= 0 && id == g_coin_ids[i]) pressed = in_coin(i);
     if (id == g_probe) pressed = (time(NULL) % 4) == 0;
     if (g_probe_n && time(NULL) >= g_probe_t0) {           // cycle: each listed id gets g_probe_step s, pressed in 1st s
         long k = (time(NULL) - g_probe_t0) / g_probe_step;
@@ -268,7 +424,7 @@ static void *sw_get_hook(int id)
     unsigned char *f = g_fake[g_fake_i++ & 7];
     if (rec) memcpy(f, rec, sizeof g_fake[0]);
     else     memset(f, 0, sizeof g_fake[0]);
-    if (id >= 793 && id <= 802 && caller == SW_DISPATCH_RET && !getenv("RIO2PAD_GUNLEVEL")) gun_report(id, pressed, f);
+    if (gun_index(id) >= 0 && caller == SW_DISPATCH_RET && !getenv("RIO2PAD_GUNLEVEL")) gun_report(id, pressed, f);
     else ((int *)f)[1] = pressed;
     if (g_debug && pressed) fprintf(stderr, "[rio2pad] switch %d -> pressed\n", id);
     return f;
@@ -278,6 +434,35 @@ static void write_abs_jmp(unsigned char *p, uint64_t target)
 {
     p[0] = 0xff; p[1] = 0x25; memset(p + 2, 0, 4);   // jmp *0(%rip)
     memcpy(p + 6, &target, 8);
+}
+
+// Browser stream (streamweb.c): a friend in a browser owns player p's slot (p = 1..3). Their buttons
+// become a virtual pad (fd -3). While a browser holds a spot and the game window is in the background,
+// this PC's own pads are ignored: a pad plugged into this PC would otherwise drive P1 AND the browser's player.
+#include "streamweb.h"
+static float g_remote_aim[MAX_PADS][2] = {{-1, 0}, {-1, 0}, {-1, 0}, {-1, 0}};
+static int our_window_focused(void);
+static void poll_browser(void)
+{
+    if (!streamweb_active()) return;
+    int mute = streamweb_players() > 0 && !our_window_focused();
+    if (mute != g_pads_muted) { fprintf(stderr, "[rio2pad] host pads %s\n", mute ? "ignored: a browser player is connected and the game window is in the background" : "back on"); g_pads_muted = mute; }
+    for (int p = 1; p < MAX_PADS; p++) {
+        struct streampad st = {0};
+        float rx, ry;
+        int on = streamweb_pad(p, &st, &rx, &ry);
+        g_remote_aim[p][0] = -1;
+        if (!on) { if (g_pads[p].fd == -3) { g_pads[p].fd = -1; fprintf(stderr, "[rio2pad] player %d: browser left\n", p + 1); } continue; }
+        if (g_pads[p].fd >= 0) continue;   // a real pad already has this slot
+        if (g_pads[p].fd != -3) { g_pads[p].fd = -3; snprintf(g_pads[p].path, sizeof g_pads[p].path, "browser"); fprintf(stderr, "[rio2pad] player %d = browser player\n", p + 1); }
+        g_remote_aim[p][0] = rx; g_remote_aim[p][1] = ry;
+        g_pads[p].btn[PAD_START] = !!(st.buttons & 8);
+        g_pads[p].btn[PAD_BACK] = !!(st.buttons & 16);
+        g_pads[p].btn[PAD_RB] = !!(st.buttons & 2);
+        g_pads[p].axis[5] = st.buttons & 1 ? 32767 : -32767;
+        g_pads[p].axis[2] = st.buttons & 4 ? 32767 : -32767;
+        for (int a = 0; a < 2; a++) g_pads[p].axis[a] = g_pads[p].axis[3 + a] = 0;
+    }
 }
 
 // Called from the pad thread every ~4 ms: integrate the left stick into the aim point.
@@ -311,6 +496,19 @@ static void update_aim(void)
         }
     }
     for (int p = 0; p < MAX_PADS; p++) {
+        if (g_remote_aim[p][0] >= 0) {   // browser player: aims where their mouse is (or their pad moved it)
+            // the browser gets the picture as shown, so map it like the local mouse (hybrid 4P views)
+            float ax = g_remote_aim[p][0], ay = g_remote_aim[p][1];
+            if (RAVEN_VIEW == 1) ax *= 0.5f;
+            else if (RAVEN_VIEW == 4 && GFX_RES_H > 0) {
+                float band = (float)GFX_RES_W * 9.0f / 32.0f / GFX_RES_H;
+                if (band < 1) ay = (ay - (1 - band) / 2) / band;
+            }
+            g_aim[p][0] = ax < 0 ? 0 : ax > 1 ? 1 : ax;
+            g_aim[p][1] = ay < 0 ? 0 : ay > 1 ? 1 : ay;
+            continue;
+        }
+        if (g_pads_muted && g_pads[p].fd != -3) continue;
         float sx = g_pads[p].axis[3] / 32767.0f, sy = g_pads[p].axis[4] / 32767.0f;   // right stick (or left stick if larger)
         float lx = g_pads[p].axis[0] / 32767.0f, ly = g_pads[p].axis[1] / 32767.0f;
         if (lx * lx + ly * ly > sx * sx + sy * sy) { sx = lx; sy = ly; }
@@ -440,6 +638,9 @@ static void scan_pads(void)
             memset((void *)g_pads[slot].btn, 0, sizeof g_pads[slot].btn);
             memset((void *)g_pads[slot].axis, 0, sizeof g_pads[slot].axis);
             snprintf(g_pads[slot].path, sizeof g_pads[slot].path, "%s", path);
+            // DualShock 4 / DualSense: "Sony ... Wireless Controller", "DualSense Wireless Controller"
+            g_pads[slot].sony = strcasestr(name, "sony") || strcasestr(name, "dualsense") || strcasestr(name, "dualshock") ||
+                                (strcasestr(name, "wireless controller") && !strcasestr(name, "xbox"));
             g_pads[slot].fd = fd;
             fprintf(stderr, "[rio2pad] player %d = %s (%s)\n", slot + 1, path, name);
         }
@@ -507,6 +708,14 @@ static int x_ours(XID_ w)
     return last_ok;
 }
 
+static int our_window_focused(void)
+{
+    if (!x_init()) return 0;
+    XID_ w; int rev;
+    X.focus(X.dpy, &w, &rev);
+    return w > 1 && x_ours(w);
+}
+
 static void poll_mouse(void)
 {
     static int have_last, lx, ly;
@@ -524,8 +733,19 @@ static void poll_mouse(void)
     if (rio2pad_mouse_mode == 1) {
         if (have_last && (wx != lx || wy != ly) && inside) {
             g_mouse_owns = 1;
-            g_aim[0][0] = (wx + 0.5f) / ww;
-            g_aim[0][1] = (wy + 0.5f) / wh;
+            // map against the picture as shown (ravengfx.c centres it with bars when the window is larger)
+            static int *pic; if (!pic) pic = dlsym(RTLD_DEFAULT, "ravengfx_pic");
+            float ax = (wx + 0.5f) / ww, ay = (wy + 0.5f) / wh;
+            if (pic && pic[2] > 0 && pic[3] > 0) { ax = (wx - pic[0] + 0.5f) / pic[2]; ay = (wy - pic[1] + 0.5f) / pic[3]; }
+            // hybrid 4-player views (ravengfx.c raven_view): menu shows the left half only;
+            // mission draws the 2D layer (crosshairs) in the middle 32:9 band
+            if (RAVEN_VIEW == 1) ax *= 0.5f;
+            else if (RAVEN_VIEW == 4 && GFX_RES_H > 0) {
+                float band = (float)GFX_RES_W * 9.0f / 32.0f / GFX_RES_H;
+                if (band < 1) ay = (ay - (1 - band) / 2) / band;
+            }
+            g_aim[0][0] = ax < 0 ? 0 : ax > 1 ? 1 : ax;
+            g_aim[0][1] = ay < 0 ? 0 : ay > 1 ? 1 : ay;
         }
         lx = wx; ly = wy; have_last = 1;
     } else {
@@ -609,6 +829,7 @@ static void *pad_thread(void *arg)
         time_t now = time(NULL);
         if (now != last_scan) { scan_pads(); last_scan = now; }
         if (g_swlog && now - last_log >= 5) { dump_swlog(); last_log = now; }
+        if (g_players4 && !g_coop_mode) map_append_4p();   // coop: at the frame tick (same frame on every PC)
         static time_t last_proc;
         if (getenv("RIO2PAD_PROCLOG") && now - last_proc >= 2) {   // live game procs = current screen/state
             static char prev[2048];
@@ -630,6 +851,8 @@ static void *pad_thread(void *arg)
             if (g_pads[p].fd >= 0) { pfd[np].fd = g_pads[p].fd; pfd[np].events = POLLIN; map[np++] = p; }
         poll_mouse();
         poll_keys();
+        poll_browser();
+        { static time_t la; if (now != la) { la = now; streamweb_hook_alsa(); } }
         update_aim();
         if (poll(pfd, np, 4) <= 0) continue;
 
@@ -643,6 +866,14 @@ static void *pad_thread(void *arg)
             struct js_event e;
             while (read(pd->fd, &e, sizeof e) == sizeof e) {
                 int type = e.type & ~JS_EVENT_INIT;
+                // PlayStation pads: cross 0, circle 1, triangle 2, square 3, L1 4, R1 5, L2 6, R2 7,
+                // share/create 8, options 9 -> the Xbox numbers used here (L2/R2 also come as axes 2/5)
+                if (type == JS_EVENT_BUTTON && pd->sony) {
+                    static const signed char ps2x[16] = {PAD_A, PAD_B, PAD_Y, PAD_X, PAD_LB, PAD_RB, -1, -1, PAD_BACK, PAD_START, -1, -1, -1, -1, -1, -1};
+                    int b = e.number < 16 ? ps2x[e.number] : -1;
+                    if (b < 0) continue;
+                    e.number = (unsigned char)b;
+                }
                 if (type == JS_EVENT_BUTTON && e.number < 32) {
                     if (getenv("RIO2PAD_FREEPLAY") && !atoi(getenv("RIO2PAD_FREEPLAY")) && e.number == PAD_Y && e.value && !pd->btn[PAD_Y] && !(e.type & JS_EVENT_INIT))
                         pd->coin_t = now_ms();
@@ -742,6 +973,23 @@ static void patch_skip_boot_checks(void)
     fprintf(stderr, "[rio2pad] skipboot: file test and gun calibration disabled\n");
 }
 
+static void make_writable(uintptr_t a, size_t n)
+{
+    uintptr_t lo = a & ~0xfffUL, hi = (a + n + 0xfff) & ~0xfffUL;
+    mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE | PROT_EXEC);
+}
+
+// Replace n bytes at a (if they are `expect`) with `with` (m bytes, rest NOPs). Logs what it did.
+static int patch(uintptr_t a, const char *expect, const char *with, int n, int m, const char *what)
+{
+    if (memcmp((void *)a, expect, n)) { fprintf(stderr, "[rio2pad] unexpected bytes at %s, left alone\n", what); return 0; }
+    make_writable(a, n);
+    memset((void *)a, 0x90, n);
+    memcpy((void *)a, with, m);
+    fprintf(stderr, "[rio2pad] 4-player cabinet: %s patched\n", what);
+    return 1;
+}
+
 static void patch_gun_count(void)
 {
     unsigned char *f = (unsigned char *)IRT_SET_CABTYPE;
@@ -749,11 +997,100 @@ static void patch_gun_count(void)
         fprintf(stderr, "[rio2pad] unexpected irt cabinet-type code, not patching\n");
         return;
     }
-    mprotect((void *)(IRT_SET_CABTYPE & ~0xfffUL), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC);
-    memcpy(f, "\x31\xc0\x90", 3);
+    // jump table for irt types 7..11: index 0 = 2 guns, index 3 = 4 guns (gun count 0x1f392d0,
+    // which the per-frame gun poll 0x624110 loops over)
+    int guns = getenv("RIO2PAD_GUNS") ? atoi(getenv("RIO2PAD_GUNS")) : g_players4 ? 4 : 2;
+    make_writable(IRT_SET_CABTYPE, 3);
+    memcpy(f, guns >= 3 ? "\x6a\x03\x58" : "\x31\xc0\x90", 3);   // push 3; pop rax  /  xor eax,eax
+    if (!g_players4) return;
+
+    // Everything below: the 4-player cabinet (type 9), found on Windows (win/rio2pad_win.c patch_misc,
+    // github_staging/NEXT_STEPS_COOP.md "type 9" sections).
+    // The game never calls irt_systemSetCabinetType itself here, and the gun device (poll 0x624110) is
+    // switched off for good when its first poll finds 0 guns. So set the gun count now.
+    IRT_SET_CABTYPE_FN(10);
+    // I/O device list (0x436400): cabinet types 3 and 8 include the gun device (mask bit 8); the
+    // 4-player cabinet has other gun hardware (bit 0x800) and leaves it out. Add bit 8 to every mask.
+    static const uintptr_t imm[] = {0x43642f, 0x436435, 0x43643b, 0x436440, 0x436445, 0x43644a, 0x43644f, 0x436454};
+    int n = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        unsigned char *b = (unsigned char *)imm[i];
+        if ((b[0] & ~4) == 0 && (b[1] == 8 || b[1] == 9)) { make_writable(imm[i], 1); b[0] |= 8; n++; }
+    }
+    fprintf(stderr, "[rio2pad] 4-player cabinet: gun device added to %d/8 device masks\n", n);
+    // The game counts RIO2 I/O boards and stops at "Number of RIO2 boards detected ... Press TEST".
+    if (!getenv("RIO2PAD_BOARDSKIP") || atoi(getenv("RIO2PAD_BOARDSKIP")))
+        patch(0x4adbc8, "\x0f\x85\xa1\x00\x00\x00", "", 6, 0, "RIO2 board count check");
+    // IR-gun input map is only built with "-random": force that branch (je 0x41c060 -> nops)
+    patch(0x41bb1c, "\x0f\x84\x3e\x05\x00\x00", "", 6, 0, "IR-gun input map branch");
+    // ... which writes through the analog input array pointer that only the stick-gun init sets
+    *(unsigned char **)0x180ae78UL = (unsigned char *)0x181c320UL;
+    // 4-gun IR map loop sits behind a 4-cashbox operator setting check: force it
+    patch(0x41c6ef, "\x0f\x84\xab\x04\x00\x00", "", 6, 0, "4-gun IR map loop (cashbox check)");
+    // QR-scanner webcams: one per station on the real cabinet. Without them the attract never lets
+    // anyone join. Make the three condition setters see every scanner as present and configured.
+    patch(0x44b7b2, "\x0f\x84\xc8\x01\x00\x00", "", 6, 0, "WEBCAMS_NOT_READY (QR gate 1/3)");
+    patch(0x4491d1, "\x0f\x85\xa1\xfc\xff\xff", "\xe9\xa2\xfc\xff\xff", 6, 5, "ATTRACT_WEBCAM_CONFIG (QR gate 2/3)");
+    patch(0x449039, "\x0f\x85\x49\xfe\xff\xff", "\xe9\x4a\xfe\xff\xff", 6, 5, "P%u_WEBCAM (QR gate 3/3)");
 }
 
-__attribute__((constructor)) static void rio2pad_init(void)
+// The game's input map (dispatcher table, count 0x1771850, built at boot by 0x41baf0) still misses
+// the IR-gun channel bindings and the START joins on this cabinet. Append them once the game's own
+// build has finished, so the dispatcher picks them up on the next frame. (Windows: coop_map_append.)
+static void map_append_4p(void)
+{
+    typedef int (*map_fn)(int, int);
+    typedef void (*flag_fn)(int, int);
+    typedef void (*chan_fn)(int, float, float);
+    static int done;
+    if (done || *(volatile int *)0x1771850UL < 40) return;
+    done = 1;
+    int n0 = *(volatile int *)0x1771850UL;
+    map_fn map = (map_fn)0x4acdb0UL;
+    chan_fn chan = (chan_fn)0x61d240UL;
+    chan(580, 0.0f, 1.0f); chan(582, 0.0f, 1.0f); chan(612, 0.0f, 1.0f); chan(614, 0.0f, 1.0f);
+    for (int g = 0; g < 4; g++) {
+        for (int k = 0; k < 5; k++) map(0x319 + g * 5 + k, 0x206 + g * 12 + k);
+        for (int k = 0; k < 3; k++) map(0x319 + g * 5 + k, 0x2a3 + g * 3 + k);
+        for (int k = 0; k < 3; k++) ((flag_fn)0x61dee0UL)(0x31b + g * 5 + k, 1);
+    }
+    // START switches that exist here (577/578/609/610) -> join inputs 718..721 and player START 0x24e..
+    map(577, 718); map(578, 719); map(609, 720); map(610, 721);
+    map(577, 0x24e); map(578, 0x24f); map(609, 0x250); map(610, 0x251);
+    fprintf(stderr, "[rio2pad] 4-player cabinet: 32 IR-gun mappings + START joins appended (game map had %d)\n", n0);
+}
+
+// The game's picture size is its -fWxH argument. Adjusted here, before main() reads it (glibc hands
+// constructors the real argv), as win/ravengfx_win.c ravengfx_args does on Windows:
+//  - 4-player cabinet with RAVEN_WIDE4=1: both cabinet screens side by side, a 32:9 picture;
+//  - online coop joiner: the host's picture shape (coopnet_preconnect), as large as fits, since the
+//    camera (and every aim ray) follows it and PCs with different shapes desync.
+static void picture_size(int argc, char **argv)
+{
+    static char arg[32];
+    int k = -1, w = 0, h = 0;
+    for (int i = 1; i < argc; i++) if (!strncmp(argv[i], "-f", 2) && sscanf(argv[i] + 2, "%dx%d", &w, &h) == 2) k = i;
+    if (k < 0 || w <= 0 || h <= 0) return;
+    int ow = w, oh = h;
+    const char *w4 = getenv("RAVEN_WIDE4");
+    if (g_players4 && w4 && !strcmp(w4, "1") && w * 9 < h * 32) h = w * 9 / 32 & ~1;
+    const char *ca = getenv("RAVEN_COOP_ASPECT");
+    int aw, ah;
+    if (ca && sscanf(ca, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0 && (long long)w * ah != (long long)h * aw) {
+        // exactly the host's shape (a rounded 1066x600 for 16:9 was enough to desync): whole
+        // multiples of the reduced ratio, as large as fits
+        int a = aw, b = ah; while (b) { int t = a % b; a = b; b = t; }
+        int rw = aw / a, rh = ah / a, k = w / rw < h / rh ? w / rw : h / rh;
+        if (k > 0) { w = rw * k; h = rh * k; }
+        fprintf(stderr, "[ravengfx] coop: picture %dx%d, the host's shape %d:%d\n", w, h, aw, ah);
+    }
+    if (w == ow && h == oh) return;
+    snprintf(arg, sizeof arg, "-f%dx%d", w, h);
+    argv[k] = arg;
+    fprintf(stderr, "[rio2pad] game picture %dx%d -> %dx%d\n", ow, oh, w, h);
+}
+
+__attribute__((constructor)) static void rio2pad_init(int argc, char **argv)
 {
     // Only act inside the game itself, not in helper processes it may spawn.
     char exe[256] = "";
@@ -776,7 +1113,18 @@ __attribute__((constructor)) static void rio2pad_init(void)
         sscanf(getenv("RIO2PAD_COIN"), "%d,%d,%d,%d", &g_coin_ids[0], &g_coin_ids[1], &g_coin_ids[2], &g_coin_ids[3]);
     // Cabinet type decides which I/O modules start; 3 (4P) and 8 (2P) enable the IR gun module (bit 0x8).
     // The game reads the cached value first, so seeding it overrides the stored setting.
-    *G_CABINET_TYPE = getenv("RIO2PAD_CABTYPE") ? atoi(getenv("RIO2PAD_CABTYPE")) : 8;
+    // RIO2PAD_PLAYERS=4: the 4-player cabinet (type 9, 4 guns). Default 2 (type 8). An online host with
+    // 3-4 PCs needs it too. A coop joiner takes the host's setting (coopnet_preconnect).
+    coopnet_preconnect();
+    const char *coop = getenv("RAVEN_COOP");
+    g_players4 = (getenv("RIO2PAD_PLAYERS") && atoi(getenv("RIO2PAD_PLAYERS")) >= 3) ||
+                 (coop && !strcmp(coop, "host") && getenv("RAVEN_COOP_PLAYERS") && atoi(getenv("RAVEN_COOP_PLAYERS")) >= 3);
+    *G_CABINET_TYPE = getenv("RIO2PAD_CABTYPE") ? atoi(getenv("RIO2PAD_CABTYPE")) : g_players4 ? 9 : 8;
+    if (g_players4) fprintf(stderr, "[rio2pad] 4-player cabinet (type %d)\n", *G_CABINET_TYPE);
+    picture_size(argc, argv);
+    coop_open();
+    { extern void coop_install(void); coop_install(); }
+    { extern void coopnet_shutdown(void); atexit(coopnet_shutdown); }
     install_hook();
     hook_adj_get();
     patch_shutdown_join();
@@ -808,6 +1156,7 @@ __attribute__((constructor)) static void rio2pad_init(void)
     } else {
         fprintf(stderr, "[rio2pad] unexpected gun getter code, not hooking guns\n");
     }
+    streamweb_start();
     pthread_t th;
     pthread_create(&th, NULL, pad_thread, NULL);
     pthread_detach(th);
