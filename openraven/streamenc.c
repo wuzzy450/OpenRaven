@@ -191,11 +191,13 @@ static int enc_open(cand_t *c)
     av[n++] = "ffmpeg"; av[n++] = "-hide_banner"; av[n++] = "-loglevel"; av[n++] = "error"; av[n++] = "-nostdin";
     if (c->vendor == 0x1002 || c->vendor == 0x8086) { av[n++] = "-vaapi_device"; av[n++] = c->dev; }
     av[n++] = "-f"; av[n++] = "rawvideo"; av[n++] = "-pix_fmt"; av[n++] = "bgra"; av[n++] = "-s"; av[n++] = sz;
+    av[n++] = "-fflags"; av[n++] = "nobuffer"; av[n++] = "-flags"; av[n++] = "low_delay";   // no input queue: each frame goes straight in
+    av[n++] = "-probesize"; av[n++] = "32"; av[n++] = "-analyzeduration"; av[n++] = "0";
     av[n++] = "-r"; av[n++] = fps; av[n++] = "-i"; av[n++] = "-";
     if (c->vendor == 0x10de) {
         av[n++] = "-vf"; av[n++] = "vflip,format=nv12";
         av[n++] = "-c:v"; av[n++] = "h264_nvenc"; av[n++] = "-preset"; av[n++] = "p1"; av[n++] = "-tune"; av[n++] = "ull";
-        av[n++] = "-zerolatency"; av[n++] = "1"; av[n++] = "-rc"; av[n++] = "cbr"; av[n++] = "-aud"; av[n++] = "1";
+        av[n++] = "-zerolatency"; av[n++] = "1"; av[n++] = "-delay"; av[n++] = "0"; av[n++] = "-rc"; av[n++] = "cbr"; av[n++] = "-aud"; av[n++] = "1";
         av[n++] = "-profile:v"; av[n++] = "high";
     } else if (c->vendor) {
         av[n++] = "-vf"; av[n++] = "vflip,format=nv12,hwupload";
@@ -208,7 +210,7 @@ static int enc_open(cand_t *c)
     }
     av[n++] = "-bf"; av[n++] = "0"; av[n++] = "-g"; av[n++] = gop; av[n++] = "-b:v"; av[n++] = br;
     av[n++] = "-maxrate"; av[n++] = br; av[n++] = "-bufsize"; av[n++] = buf2;
-    av[n++] = "-f"; av[n++] = "h264"; av[n++] = "-"; av[n] = NULL;
+    av[n++] = "-flush_packets"; av[n++] = "1"; av[n++] = "-f"; av[n++] = "h264"; av[n++] = "-"; av[n] = NULL;
     int pin[2], pout[2];
     if (pipe2(pin, O_CLOEXEC) || pipe2(pout, O_CLOEXEC)) return 0;
     posix_spawn_file_actions_t fa;
