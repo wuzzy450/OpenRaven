@@ -11,16 +11,96 @@ typedef struct lx_thread {
     HANDLE h;
     sv_start_fn fn;
     void *arg, *ret;
+    volatile int blk, alive;      // blk: 0 running, else what it waits in (BLK_*)
+    volatile long nblk[8];        // how often it blocked, per kind
+    volatile LONG permits, gated; // coop gate: turns granted by the main thread; 1 once it has waited at the gate
+    volatile LONG iters;          // times it arrived at the gate
+    HANDLE evt;
 } lx_thread;
+enum { BLK_COND = 1, BLK_CONDT, BLK_SEM, BLK_SLEEP, BLK_JOIN, BLK_SEMT };
+#define MAX_THREADS 512
+static lx_thread *g_threads[MAX_THREADS];
+static volatile LONG g_nthreads;
 
 static __thread lx_thread *t_self;
 extern void raven_thread_setup(void);  // main.c: canary slot + FPU mode
 
+// Mark the calling game thread as waiting (kind) / running again (0). Used by the sleep shims too.
+void raven_thread_blk(int kind) {
+    if (!t_self) return;
+    if (kind) t_self->nblk[kind]++;
+    t_self->blk = kind;
+}
+// One line per live thread started with entry fn (0 = all): what it is doing, how often it waited.
+void raven_thread_report(uint64_t fn) {
+    for (LONG i = 0; i < g_nthreads && i < MAX_THREADS; i++) {
+        lx_thread *t = g_threads[i];
+        if (!t || (fn && (uint64_t)t->fn != fn)) continue;
+        raven_log("[threads] %p fn %p %s blk %d  cond %ld condt %ld sem %ld sleep %ld join %ld semt %ld\n", (void *)t, (void *)t->fn,
+                  t->alive ? "alive" : "done", t->blk, t->nblk[1], t->nblk[2], t->nblk[3], t->nblk[4], t->nblk[5], t->nblk[6]);
+    }
+}
+// ---- coop gate (lockstep determinism) ----
+// The game has helper threads that poll in a loop with short sleeps (movie player, loaders...). Free
+// running, they act at slightly different moments on every PC. With the gate on, such a thread stops
+// at each short sleep and gets a fixed number of turns per game frame, one thread at a time, while the
+// main thread waits at its frame tick. While the main thread itself waits for something (lock wait,
+// join, sleep) the helpers run, since it may be waiting for one of them.
+static volatile LONG g_gate_on, g_gate_open;
+static DWORD g_gate_main;
+static volatile long g_gate_timeouts;
+void raven_gate_enable(int on) { g_gate_main = GetCurrentThreadId(); InterlockedExchange(&g_gate_on, on); }
+static int gate_is_main(void) { return g_gate_on && GetCurrentThreadId() == g_gate_main; }
+static void gate_open(int d) { if (gate_is_main()) InterlockedExchangeAdd(&g_gate_open, d); }
+// Called by the sleep shims: 1 = the sleep was replaced by a wait at the gate.
+int raven_gate_sleep(unsigned us) {
+    lx_thread *t = t_self;
+    if (!g_gate_on || !t || !t->alive || us > 2000) return 0;
+    if (!t->evt) t->evt = CreateEventA(NULL, FALSE, FALSE, NULL);
+    t->blk = BLK_SLEEP; t->nblk[BLK_SLEEP]++;
+    t->gated = 1;
+    InterlockedIncrement(&t->iters);
+    for (;;) {
+        if (!g_gate_on) break;
+        if (t->permits > 0) { InterlockedDecrement(&t->permits); break; }
+        if (g_gate_open > 0) { Sleep(1); break; }
+        WaitForSingleObject(t->evt, 2);
+    }
+    t->blk = 0;
+    return 1;
+}
+// Main thread, once per frame: every gated thread gets `turns` loop passes, one thread after the other.
+void raven_gate_tick(int turns) {
+    for (LONG i = 0; i < g_nthreads && i < MAX_THREADS; i++) {
+        lx_thread *t = g_threads[i];
+        if (!t || !t->gated) continue;
+        for (int k = 0; k < turns && t->alive; k++) {
+            LONG it = t->iters;
+            InterlockedIncrement(&t->permits);
+            SetEvent(t->evt);
+            DWORD t0 = GetTickCount();
+            while (t->iters == it && t->alive) {
+                SwitchToThread();
+                if (GetTickCount() - t0 > 5000) {
+                    long n = ++g_gate_timeouts;
+                    if (n <= 20) raven_log("[gate] thread %p (fn %p) did not come back in 5 s (waiting in %d), going on\n", (void *)t, (void *)t->fn, t->blk);
+                    break;
+                }
+            }
+        }
+    }
+}
+// Main thread sleeps: it waits for something, give every helper one turn.
+void coop_presleep(unsigned us);   // coop_win.c: startup sleeps move the startup clock
+void raven_gate_main_sleep_us(unsigned us) { coop_presleep(us); }
+void raven_gate_main_sleep(void) { if (gate_is_main()) raven_gate_tick(1); }
 static DWORD WINAPI thread_main(void *p) {
     lx_thread *t = p;
     t_self = t;
     raven_thread_setup();
+    t->alive = 1;
     t->ret = t->fn(t->arg);
+    t->alive = 0;
     return 0;
 }
 
@@ -39,13 +119,19 @@ static SV int s_create(uint64_t *tid, uint64_t *attr, sv_start_fn fn, void *arg)
     t->h = CreateThread(NULL, stack, thread_main, t, 0, NULL);
     if (!t->h) { free(t); return LX_EAGAIN; }
     *tid = (uint64_t)t;
+    LONG i = InterlockedIncrement(&g_nthreads) - 1;
+    if (i < MAX_THREADS) g_threads[i] = t;
     raven_log("pthread_create(%p) -> %p\n", (void *)fn, (void *)t);
     return 0;
 }
 static SV int s_join(uint64_t tid, void **ret) {
     lx_thread *t = (lx_thread *)tid;
     if (!t || !t->h) return 3;  // ESRCH: the game joins workers it never started
+    raven_thread_blk(BLK_JOIN);
+    gate_open(1);
     WaitForSingleObject(t->h, INFINITE);
+    gate_open(-1);
+    raven_thread_blk(0);
     if (ret) *ret = t->ret;
     CloseHandle(t->h);
     return 0;
@@ -82,7 +168,11 @@ static SV int s_cond_destroy(CONDITION_VARIABLE *c) { (void)c; return 0; }
 static SV int s_cond_signal(CONDITION_VARIABLE *c) { WakeConditionVariable(c); return 0; }
 static SV int s_cond_broadcast(CONDITION_VARIABLE *c) { WakeAllConditionVariable(c); return 0; }
 static SV int s_cond_wait(CONDITION_VARIABLE *c, void **m) {
+    raven_thread_blk(BLK_COND);
+    gate_open(1);
     SleepConditionVariableCS(c, mtx(m), INFINITE);
+    gate_open(-1);
+    raven_thread_blk(0);
     return 0;
 }
 typedef struct { long long sec, nsec; } lx_timespec;
@@ -93,8 +183,13 @@ static SV int s_cond_timedwait(CONDITION_VARIABLE *c, void **m, const lx_timespe
     long long want_us = abs->sec * 1000000 + abs->nsec / 1000;
     long long ms = (want_us - now_us + 999) / 1000;
     if (ms < 0) ms = 0;
-    if (!SleepConditionVariableCS(c, mtx(m), (DWORD)ms))
-        return GetLastError() == ERROR_TIMEOUT ? LX_ETIMEDOUT : LX_EINVAL;
+    raven_thread_blk(BLK_CONDT);
+    gate_open(1);
+    BOOL ok = SleepConditionVariableCS(c, mtx(m), (DWORD)ms);
+    DWORD err = GetLastError();
+    gate_open(-1);
+    raven_thread_blk(0);
+    if (!ok) return err == ERROR_TIMEOUT ? LX_ETIMEDOUT : LX_EINVAL;
     return 0;
 }
 
@@ -116,7 +211,14 @@ static SV int s_sem_init(HANDLE *s, int pshared, unsigned v) {
     *s = CreateSemaphoreA(NULL, (LONG)v, 0x7fffffff, NULL);
     return *s ? 0 : -1;
 }
-static SV int s_sem_wait(HANDLE *s) { return WaitForSingleObject(*s, INFINITE) == WAIT_OBJECT_0 ? 0 : -1; }
+static SV int s_sem_wait(HANDLE *s) {
+    raven_thread_blk(BLK_SEM);
+    gate_open(1);
+    DWORD r = WaitForSingleObject(*s, INFINITE);
+    gate_open(-1);
+    raven_thread_blk(0);
+    return r == WAIT_OBJECT_0 ? 0 : -1;
+}
 static SV int s_sem_post(HANDLE *s) { return ReleaseSemaphore(*s, 1, NULL) ? 0 : -1; }
 static SV HANDLE *s_sem_open(const char *name, int oflag, int mode, unsigned v) {
     (void)oflag; (void)mode;
@@ -179,7 +281,12 @@ static SV int s_sem_timedwait(HANDLE *s, const lx_timespec *abs) {
     GetSystemTimePreciseAsFileTime(&ft);
     long long now_us = (long long)(((unsigned long long)ft.dwHighDateTime << 32 | ft.dwLowDateTime) / 10 - 11644473600000000ULL);
     long long ms = (abs->sec * 1000000 + abs->nsec / 1000 - now_us + 999) / 1000;
-    if (WaitForSingleObject(*s, ms < 0 ? 0 : (DWORD)ms) == WAIT_OBJECT_0) return 0;
+    raven_thread_blk(BLK_SEMT);
+    gate_open(1);
+    DWORD r = WaitForSingleObject(*s, ms < 0 ? 0 : (DWORD)ms);
+    gate_open(-1);
+    raven_thread_blk(0);
+    if (r == WAIT_OBJECT_0) return 0;
     lx_errno = LX_ETIMEDOUT;
     return -1;
 }

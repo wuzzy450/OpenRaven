@@ -274,6 +274,75 @@ static void screenshot(HWND h, unsigned long frame) {
     free(px);
 }
 
+// F12: save what is on screen as a PNG in <root>/screenshots/halo_YYYYMMDD_HHMMSS.png (for bug
+// reports). The pixels are read on the render thread; the PNG is encoded (GDI+) on its own thread
+// so the game does not hitch. With native HDR the game's screen framebuffer is read (clipped to SDR).
+typedef struct { UINT32 ver; void *cb; BOOL nothread, nocodecs; } gdip_in;
+__declspec(dllimport) int WINAPI GdiplusStartup(ULONG_PTR *, const gdip_in *, void *);
+__declspec(dllimport) int WINAPI GdipCreateBitmapFromScan0(int, int, int, int, BYTE *, void **);
+__declspec(dllimport) int WINAPI GdipSaveImageToFile(void *, const WCHAR *, const CLSID *, const void *);
+__declspec(dllimport) int WINAPI GdipDisposeImage(void *);
+typedef struct { int w, h; unsigned char *px; WCHAR path[MAX_PATH * 2]; } shot_job;
+static DWORD WINAPI shot_thread(void *arg) {
+    shot_job *j = arg;
+    static ULONG_PTR tok;
+    if (!tok) { gdip_in in = {1, NULL, FALSE, FALSE}; GdiplusStartup(&tok, &in, NULL); }
+    static const CLSID png = {0x557cf406, 0x1a04, 0x11d3, {0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e}};
+    int row = j->w * 3;
+    void *bmp = NULL;   // GL rows are bottom-up: start at the last row with a negative stride
+    int st = GdipCreateBitmapFromScan0(j->w, j->h, -row, 0x00021808 /* 24bpp RGB (BGR order) */,
+                                       j->px + (size_t)row * (j->h - 1), &bmp);
+    if (!st && bmp) st = GdipSaveImageToFile(bmp, j->path, &png, NULL);
+    if (bmp) GdipDisposeImage(bmp);
+    char p8[MAX_PATH * 4]; WideCharToMultiByte(CP_UTF8, 0, j->path, -1, p8, sizeof p8, NULL, NULL);
+    if (st) raven_log("[shot] F12 screenshot failed (%d): %s\n", st, p8);
+    else raven_log("[shot] F12 screenshot %s\n", p8);
+    free(j->px); free(j);
+    return 0;
+}
+static void hotkey_shot(HWND h, int ww, int wh) {
+    static int was;
+    int down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0 && GetForegroundWindow() == h;
+    if (!down || was) { was = down; return; }
+    was = 1;
+    { extern volatile int raven_place_req; raven_place_req = 1; }   // log next frame's 2D placement
+    extern unsigned ravengl_screen_fbo(void);
+    extern void ravengl_screen_size(int *, int *);
+    unsigned sfb = ravengl_screen_fbo();
+    int w = ww, ht = wh;
+    if (sfb) ravengl_screen_size(&w, &ht);
+    if (w <= 0 || ht <= 0) return;
+    shot_job *j = calloc(1, sizeof *j);
+    if (!j || !(j->px = malloc((size_t)w * ht * 3))) { free(j); return; }
+    j->w = w; j->h = ht;
+    typedef void (APIENTRY *gi_fn)(unsigned, int *);
+    typedef void (APIENTRY *bd_fn)(unsigned, unsigned);
+    gi_fn geti = (gi_fn)gl_resolve("glGetIntegerv");
+    bd_fn bindfb = (bd_fn)gl_resolve("glBindFramebuffer");
+    typedef void (APIENTRY *rp_fn)(int, int, int, int, unsigned, unsigned, void *);
+    typedef void (APIENTRY *ps_fn)(unsigned, int);
+    typedef void (APIENTRY *rb_fn)(unsigned);
+    rp_fn rp = (rp_fn)gl_resolve("glReadPixels"); ps_fn ps = (ps_fn)gl_resolve("glPixelStorei");
+    rb_fn rbuf = (rb_fn)gl_resolve("glReadBuffer"); bd_fn bindbuf = (bd_fn)gl_resolve("glBindBuffer");
+    int pread = 0, palign = 4, ppack = 0, prb = 0;
+    geti(0x8CAA, &pread); geti(0x0D05, &palign); geti(0x88ED, &ppack); geti(0x0C02, &prb);
+    bindfb(0x8CA8, sfb);
+    rbuf(sfb ? 0x8CE0 : 0x0405);   // COLOR_ATTACHMENT0 / GL_BACK
+    bindbuf(0x88EB, 0); ps(0x0D05, 1);
+    rp(0, 0, w, ht, 0x80E0, 0x1401, j->px);   // GL_BGR, GL_UNSIGNED_BYTE
+    ps(0x0D05, palign); bindbuf(0x88EB, (unsigned)ppack);
+    rbuf((unsigned)prb); bindfb(0x8CA8, (unsigned)pread);
+    SYSTEMTIME t; GetLocalTime(&t);
+    WCHAR dir[MAX_PATH * 2];
+    MultiByteToWideChar(CP_UTF8, 0, g_root, -1, dir, MAX_PATH);
+    wcscat(dir, L"\\screenshots");
+    CreateDirectoryW(dir, NULL);
+    _snwprintf(j->path, MAX_PATH * 2, L"%ls\\halo_%04u%02u%02u_%02u%02u%02u_%03u.png", dir,
+               t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    HANDLE th = CreateThread(NULL, 0, shot_thread, j, 0, NULL);
+    if (th) CloseHandle(th); else { free(j->px); free(j); }
+}
+
 // The game renders at the size it asked for (e.g. 1280x720) in the lower-left corner of our
 // fullscreen window. Before each swap, copy that corner into an FBO and stretch it over the
 // whole window, keeping the aspect ratio (black bars if it differs). RAVEN_NOSCALE=1 turns it off.
@@ -290,6 +359,17 @@ typedef void (APIENTRY *pfn_getf)(unsigned, float *);
 typedef void (APIENTRY *pfn_clr)(unsigned);
 typedef void (APIENTRY *pfn_cmask)(unsigned char, unsigned char, unsigned char, unsigned char);
 typedef void (APIENTRY *pfn_getb)(unsigned, unsigned char *);
+// Where the game picture (gw x gh) goes in a ww x wh window, GL coordinates (bottom-left).
+// Aspect kept and centred. raven_src_w(): how much of the picture is shown - the left half in
+// the hybrid 4-player menu view (raven_view 1, ravengfx_win.c), stretched to the full shape.
+extern int raven_view;
+int raven_src_w(int gw) { return gw; }
+void raven_fit_rect(int gw, int gh, int ww, int wh, int *dx, int *dy, int *dw, int *dh) {
+    double a = (double)gw / gh;
+    int w = ww, h = (int)(ww / a + 0.5);
+    if (h > wh) { h = wh; w = (int)(wh * a + 0.5); }
+    *dw = w; *dh = h; *dx = (ww - w) / 2; *dy = (wh - h) / 2;
+}
 static void present_scaled(uint64_t draw, int ww, int wh) {
     static int off = -1;
     if (off < 0) { const char *e = raven_env("RAVEN_NOSCALE"); off = e && *e == '1'; }
@@ -357,11 +437,10 @@ static void present_scaled(uint64_t draw, int ww, int wh) {
     bindfb(0x8CA9, 0);
     clearcolor(0, 0, 0, 1);
     clear(0x4000);
-    int dw = ww, dh = (int)((long long)ww * gh / gw);
-    if (dh > wh) { dh = wh; dw = (int)((long long)wh * gw / gh); }
-    int dx = (ww - dw) / 2, dy = (wh - dh) / 2;
+    int dx, dy, dw, dh;
+    raven_fit_rect(gw, gh, ww, wh, &dx, &dy, &dw, &dh);
     bindfb(0x8CA8, fbo);
-    blit(0, 0, gw, gh, dx, dy, dx + dw, dy + dh, 0x4000, 0x2601);   // GL_LINEAR
+    blit(0, 0, raven_src_w(gw), gh, dx, dy, dx + dw, dy + dh, 0x4000, 0x2601);   // GL_LINEAR
 
     bindfb(0x8CA8, (unsigned)pread);
     bindfb(0x8CA9, (unsigned)pdraw);
@@ -455,6 +534,7 @@ static SV void s_glXSwapBuffers(void *d, uint64_t draw) {
     RECT cr;
     GetClientRect(h, &cr);
     present_scaled(draw, cr.right, cr.bottom);
+    hotkey_shot(h, cr.right, cr.bottom);   // F12 -> screenshots/*.png
     if (every && frames % every == 0) screenshot(h, frames);
     small_shot(cr.right, cr.bottom, frames);
     // Flicker hunt: log hitches (frame gap > 50 ms), slow swaps, and another window in front.

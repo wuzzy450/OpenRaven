@@ -148,6 +148,8 @@ static intptr_t g_start[3];
 static DWORD WINAPI game_thread(void *p) {
     (void)p;
     raven_thread_setup();
+    extern void coop_game_thread(void);
+    coop_game_thread();
     s_libc_start_main((sv_main_fn)g_start[0], g_argc, g_argv, (sv_init_fn)g_start[1],
                       (void *)g_start[2], NULL, NULL);
     raven_log("game thread: __libc_start_main returned\n");
@@ -280,6 +282,10 @@ int main(int argc, char **argv) {
     extern void ravengfx_install(void);
     extern int ravengfx_args(char **argv, int argc);
     ravengfx_install();
+    extern void coopnet_preconnect(void);
+    coopnet_preconnect();   // coop joiner: copy the host's cabinet/player count before anything uses them
+    extern void raven_coop_saves_init(void);
+    raven_coop_saves_init();
     g_argv = calloc(ne + 8, sizeof(char *));
     g_argv[0] = "/pm/g7/halo/game";
     g_argc = ravengfx_args(g_argv, 1);
@@ -292,6 +298,8 @@ int main(int argc, char **argv) {
 
     extern void rio2pad_install(void);
     rio2pad_install();
+    extern void coop_install(void);
+    coop_install();
 
     run_inits(lm);
     run_inits(cm);

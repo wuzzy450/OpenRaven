@@ -162,11 +162,51 @@ static SV int hook_set_mode(uint8_t *m) {
 // ---- Hor+ / FOV on the camera projection (see ravengfx.c) ----
 uint64_t proj_ret = PROJ_CONT;
 static float proj_aspect, proj_fovk = 1.0f;
-static int proj_on;
+static int proj_on, proj_wide4;
+// Hybrid 4-player mode (RAVEN_WIDE4=hybrid): the game runs at the screen's own shape (16:9),
+// where everything authored for the cabinet's 32:9 screen comes out squeezed. The loader picks
+// a view per frame (raven_view, read by shim_glx.c / ravenhdr_win.c / gl_hooks.c / rio2pad_win.c):
+//  1 menu    - full picture, background camera vert+ (like missions); the menu's 2D layer is
+//              drawn twice as wide (gl_hooks.c), so its left copy - one whole cabinet screen -
+//              fills the screen once in its right shape and the right copy falls off the edge;
+//  2 mission - full picture, 3D camera vert+ (more above/below), the 2D layer (HUDs,
+//              crosshairs) drawn into the middle 32:9 band so it keeps its shape and lines up
+//              with the 3D view;
+//  3 movie   - full picture; shim_core.c swaps in the 16:9 cutscene files (X_1080.webm).
+//  4 wide menu - mission select: one layout across BOTH cabinet screens (6 mission cards): the
+//              2D layer goes into the middle 32:9 band over the vert+ background. From condition
+//              GAMESEL_CHAPTER until GAMESEL_DONE / the next game-select scene.
+// Mission = the game drew its shadow map this frame (8192x8192 pass; menus/movies have none).
+int raven_view = 0;
+volatile int raven_shadow_seen;   // gl_hooks.c
+static int proj_hybrid;
 SV void proj_fix(uint8_t *cam) {
     float *p00 = (float *)(cam + 0x170), *p11 = (float *)(cam + 0x184);
-    if (!proj_on || *p00 <= 0 || *p11 <= 0) return;
+    if (*p00 <= 0 || *p11 <= 0) return;
     float shape = *p11 / *p00;
+    {   // RAVEN_PROCLOG debug: cameras used this frame
+        extern void *dbg_cams[8]; extern int dbg_ncam;
+        int k = 0; while (k < dbg_ncam && dbg_cams[k] != cam) k++;
+        if (k == dbg_ncam && dbg_ncam < 8) dbg_cams[dbg_ncam++] = cam;
+    }
+    if (proj_hybrid && raven_view == 3) return;   // movies: cameras stay native
+    if (!proj_on) return;
+    // 4-player cabinet: the game's camera is 32:9 (two screens). Shown in one window it comes out tall
+    // and skinny. Keep the full width of view and show more above and below (RAVEN_WIDE4FIT=crop: keep
+    // the height and cut the sides instead, which looks zoomed in).
+    //
+    // In the native 32:9 video mode (RAVEN_WIDE4, default on for 4 players) the wide4 branch is a
+    // no-op for the 32:9 camera (the mode aspect already matches) and, importantly, the 16:9 cameras
+    // below must stay native: the cutscenes render each half with its own 16:9 camera into a half-size
+    // viewport, so widening them to the full 32:9 would squeeze them again. 16:9 Hor+ only makes sense
+    // without the 4-player mode, so return after the wide4 branch.
+    if (proj_wide4) {
+        if (shape > 3.4f && shape < 3.7f && proj_aspect > 0) {
+            if (proj_wide4 == 2) *p00 = *p11 / proj_aspect; else *p11 = *p00 * proj_aspect;
+            *p00 /= proj_fovk; *p11 /= proj_fovk;
+        }
+        return;
+    }
     if (shape < 1.70f || shape > 1.85f) return;  // not the 16:9 camera
     if (proj_aspect > 16.0f / 9.0f) *p00 = *p11 / proj_aspect;
     else if (proj_aspect > 0) *p11 = *p00 * proj_aspect;
@@ -206,10 +246,99 @@ static void hook_proj(void) {
 }
 static void proj_update(void) {
     const char *hp = lookup("HOR_PLUS"), *fv = lookup("FOV_SCALE");
+    // Online coop: the host's camera settings (coopnet_preconnect), since they change every aim ray.
+    if (raven_env("RAVEN_COOP_HORPLUS")) hp = raven_env("RAVEN_COOP_HORPLUS");
+    if (raven_env("RAVEN_COOP_FOV")) fv = raven_env("RAVEN_COOP_FOV");
     proj_on = hp ? atoi(hp) != 0 : 1;
     proj_fovk = fv && atof(fv) > 0.3 ? (float)atof(fv) : 1.0f;
     if (ravengfx_win_h > 0) proj_aspect = (float)ravengfx_win_w / ravengfx_win_h;
     if (fabsf(proj_aspect - 16.0f / 9.0f) < 0.01f && proj_fovk == 1.0f) proj_on = 0;
+    const char *pl = raven_env("RIO2PAD_PLAYERS");
+    proj_wide4 = pl && atoi(pl) >= 3 ? (raven_env("RAVEN_WIDE4FIT") ? 2 : 1) : 0;
+    if (proj_wide4 && fabsf(proj_aspect - 32.0f / 9.0f) > 0.05f) proj_on = 1;
+    const char *w4 = raven_env("RAVEN_WIDE4");
+    int hy = proj_wide4 && w4 && !strcmp(w4, "hybrid") && proj_aspect < 3.3f;
+    if (hy && !proj_hybrid) raven_view = 1;   // start in the menus
+    if (!hy) raven_view = 0;
+    proj_hybrid = hy;
+}
+// RAVEN_PROCLOG=1: log the game's running proc names whenever the set changes (debug).
+void *dbg_cams[8]; int dbg_ncam;
+static void proc_log(void) {
+    static int on = -1; static char last[4096];
+    if (on < 0) on = raven_env("RAVEN_PROCLOG") != NULL;
+    if (!on) return;
+    char cur[4096]; int o = 0;
+    for (int i = 0; i < 64 && o < 4000; i++) {
+        const char *s = (const char *)(0x1dd78c0ULL + i * 0x448ULL);
+        if (s[0x28] & 1) o += snprintf(cur + o, sizeof cur - o, " %.40s", s);
+    }
+    o += snprintf(cur + o, sizeof cur - o, " | ps");
+    for (int i = 0; i < 4; i++) o += snprintf(cur + o, sizeof cur - o, " %02x", *(volatile unsigned char *)(0x1c0c7c0ULL + i * 0x250ULL));
+    o += snprintf(cur + o, sizeof cur - o, " | cams");
+    for (int i = 0; i < dbg_ncam; i++) {
+        float *c = (float *)((char *)dbg_cams[i] + 0x170);
+        o += snprintf(cur + o, sizeof cur - o, " %p:%.2f", dbg_cams[i], c[0] > 0 ? c[5] / c[0] : 0.0f);
+    }
+    dbg_ncam = 0;
+    static unsigned long fr; fr++;
+    if (strcmp(cur, last)) { strcpy(last, cur); raven_log("[procs] f%lu%s\n", fr, cur); }
+}
+
+// Script conditions (0x4ab530 = set(ctx, name), 0x4ab8a0 = the other half of the pair). The
+// hybrid view watches them to know which menu screen is up; RAVEN_CONDLOG=1 logs every name.
+typedef SV long (*cond_fn)(int, const char *);
+static cond_fn cond_a_orig, cond_b_orig;
+static unsigned long cond_frame;
+static void cond_seen(char k, int ctx, const char *n) {
+    static int on = -1;
+    if (on < 0) on = raven_env("RAVEN_CONDLOG") != NULL;
+    if (on && n) {
+        static char last[64]; static char lk;
+        if (lk != k || strncmp(last, n, 63)) {
+            snprintf(last, sizeof last, "%s", n); lk = k;
+            raven_log("[cond] f%lu %c %d %.60s\n", cond_frame, k, ctx, n);
+        }
+    }
+}
+static volatile int g_missionsel;   // mission select screen up (wide menu view)
+static SV long cond_a(int ctx, const char *n) {
+    cond_seen('A', ctx, n);
+    if (n) {
+        if (!strcmp(n, "GAMESEL_CHAPTER")) g_missionsel = 1;
+        else if (!strcmp(n, "GAMESEL_DONE") || !strcmp(n, "BACK") || !strcmp(n, "SCENE_START_game_select2") || !strcmp(n, "MIN_LOAD_DONE")) g_missionsel = 0;
+    }
+    return cond_a_orig(ctx, n);
+}
+static SV long cond_b(int ctx, const char *n) { cond_seen('B', ctx, n); return cond_b_orig(ctx, n); }
+static void hook_cond(void) {
+    static const uint8_t pa[] = {0x41,0x54,0x55,0x53,0x48,0x83,0xec,0x10,0x65,0x48,0x8b,0x04,0x25,0x28,0x00,0x00,0x00};
+    static const uint8_t pb[] = {0x55,0x53,0x48,0x83,0xec,0x18,0x65,0x48,0x8b,0x04,0x25,0x28,0x00,0x00,0x00};
+    /* the loader rewrites the TLS canary load (fs -> gs, maybe more): match the first 8 bytes,
+       then copy the 17/15 live prologue bytes as they are now (same instruction lengths) */
+    if (!memcmp((void *)0x4ab530, pa, 8)) cond_a_orig = hook(0x4ab530, (const uint8_t *)0x4ab530, sizeof pa, (void *)cond_a);
+    if (!memcmp((void *)0x4ab8a0, pb, 6)) cond_b_orig = hook(0x4ab8a0, (const uint8_t *)0x4ab8a0, sizeof pb, (void *)cond_b);
+    const uint8_t *qa = cond_a_orig ? (const uint8_t *)cond_a_orig : (const uint8_t *)0x4ab530;
+    raven_log("[ravengfx] condition hooks: %s %s (bytes %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x)\n",
+              cond_a_orig ? "ok" : "no", cond_b_orig ? "ok" : "no",
+              qa[8], qa[9], qa[10], qa[11], qa[12], qa[13], qa[14], qa[15], qa[16], qa[17]);
+}
+static void hybrid_frame(void) {
+    static int run, want_last;
+    extern volatile int raven_movie_open;
+    proc_log();
+    cond_frame++;
+    if (!proj_hybrid) { raven_shadow_seen = 0; return; }
+    int want = raven_movie_open ? 3 : raven_shadow_seen ? 2 : g_missionsel ? 4 : 1;
+    if (want == 2) g_missionsel = 0;
+    raven_shadow_seen = 0;
+    if (want == raven_view) { run = 0; return; }
+    if (want != want_last) run = 0;
+    want_last = want;
+    if (want != 3 && ++run < 8) return;   // a movie switches at once, the rest after 8 frames
+    run = 0;
+    raven_view = want;
+    raven_log("[ravengfx] hybrid view: %s\n", want == 1 ? "menu (left half)" : want == 2 ? "mission (full, HUD band)" : want == 4 ? "mission select (32:9)" : "movie (full)");
 }
 
 // ---- per frame, from s_glXSwapBuffers before the picture is scaled and swapped ----
@@ -225,6 +354,7 @@ void ravengfx_frame(void) {
     static double tl;
     double t = now_s();
     if (!tl) tl = t;
+    hybrid_frame();
     if (frames % 30 == 0) {
         proj_update();
         // VSYNC (0 off, 1 on, adaptive = -1). The game sets its own interval; ours wins each time.
@@ -333,6 +463,8 @@ void ravengfx_frame(void) {
         bb(0x88EB, (unsigned)pp);
         bf(0x8CA8, (unsigned)rfb);
     }
+    extern void streamenc_frame(int sw, int sh);   // browser stream: game picture only, before the overlay
+    streamenc_frame(ravengfx_win_w, ravengfx_win_h);
     extern void ravengfx_overlay_draw(int sw, int sh);  // ravenui_win.c (F1 overlay, FPS counter)
 #ifdef RAVEN_REC
     extern void ravenrec_frame(int sw, int sh);   // local add-on (local.mk)
@@ -343,6 +475,14 @@ void ravengfx_frame(void) {
     ravengl_frame_end();  // FSR 2: new frame (dispatch again, fresh jitter)
     frames++;
     if (t - tl >= 1) { ravengfx_fps = (float)((frames - fl) / (t - tl)); tl = t; fl = frames; }
+}
+
+// For the coop host's T_SETUP answer: the settings that shape the camera.
+void ravengfx_coop_camera(float *fovk, int *horplus)
+{
+    const char *hp = lookup("HOR_PLUS"), *fv = lookup("FOV_SCALE");
+    *horplus = hp ? atoi(hp) != 0 : 1;
+    *fovk = fv && atof(fv) > 0.3 ? (float)atof(fv) : 1.0f;
 }
 
 // ---- launcher part: resolution -> game args ----
@@ -356,6 +496,34 @@ int ravengfx_args(char **argv, int argc) {
         else { w = GetSystemMetrics(SM_CXSCREEN); h = GetSystemMetrics(SM_CYSCREEN); }
     }
     if (raven_env("RAVEN_WINDOWED") && !raven_env("RAVEN_RES")) w = 1280, h = 720;
+    // 4-player cabinet (RIO2PAD_PLAYERS=4): the game draws two cabinet screens side by side, so it needs
+    // a 32:9 picture. Keep the width that fits the screen (fullscreen) or double it (window).
+    // Default ON for the 4-player cabinet (RAVEN_WIDE4=0 opts out): in a 16:9 window the per-half
+    // content (cutscene cameras, wide menu layouts, movies) is squeezed to half width - skinny people.
+    // Same players4 condition as rio2pad_win.c, so coop 4P gets it too.
+    const char *pl = raven_env("RIO2PAD_PLAYERS");
+    const char *cp = raven_env("RAVEN_COOP");
+    const char *cpp = raven_env("RAVEN_COOP_PLAYERS");
+    int players4 = (pl && atoi(pl) >= 3) || (cp && !strcmp(cp, "host") && cpp && atoi(cpp) >= 3);
+    const char *w4 = raven_env("RAVEN_WIDE4");
+    if (players4 && w4 && !strcmp(w4, "hybrid"))
+        raven_log("[ravengfx] 4-player cabinet, hybrid: %dx%d, menus/cutscenes shown 32:9, missions full screen\n", w, h);
+    else if (players4 && !raven_env("RAVEN_RES") && w * 9 < h * 32 && (!w4 || strcmp(w4, "0") != 0)) {
+        if (raven_env("RAVEN_WINDOWED")) w *= 2;
+        h = w * 9 / 32;
+        raven_log("[ravengfx] 4-player cabinet: two screens side by side, %dx%d%s\n", w, h,
+                  w4 ? "" : " (32:9 default; RAVEN_WIDE4=0 for the old squeezed 16:9 window)");
+    }
+    // Online coop joiner: the game camera (and so every aim ray) follows the picture's shape, and
+    // PCs with different shapes desync. Use the host's shape (coopnet_preconnect sets this), as large
+    // as fits this PC's picture; the rest of the screen is black bars.
+    const char *ca = raven_env("RAVEN_COOP_ASPECT");
+    int aw, ah;
+    if (ca && sscanf(ca, "%d:%d", &aw, &ah) == 2 && aw > 0 && ah > 0 && (long long)w * ah != (long long)h * aw) {
+        if ((long long)w * ah > (long long)h * aw) w = (int)((long long)h * aw / ah) & ~1;
+        else h = (int)((long long)w * ah / aw) & ~1;
+        raven_log("[ravengfx] coop: picture %dx%d, the host's shape %d:%d (black bars around it)\n", w, h, aw, ah);
+    }
     ravengfx_res_w = w; ravengfx_res_h = h;
     snprintf(g_res_arg, sizeof g_res_arg, "-f%dx%d", w, h);
     argv[argc++] = g_res_arg;
@@ -396,14 +564,35 @@ void ravengfx_install(void) {
     } else raven_log("[ravengfx] video mode hook NOT installed (unexpected bytes)\n");
 
     hook_proj();
+    hook_cond();
 
     // Launcher/input keys from graphics.ini, like graphics.sh (env vars win). rio2pad reads them.
     static const char *map[][2] = {{"skip_boot", "RIO2PAD_SKIPBOOT"}, {"free_play", "RIO2PAD_FREEPLAY"},
                                    {"stick_speed", "RIO2PAD_STICKSPEED"}, {"aim", "RIO2PAD_AIM"},
-                                   {"mouse", "RIO2PAD_MOUSE"}, {"mouse_sens", "RIO2PAD_MOUSESENS"}};
+                                   {"mouse", "RIO2PAD_MOUSE"}, {"mouse_sens", "RIO2PAD_MOUSESENS"},
+                                   {"players", "RIO2PAD_PLAYERS"}};
     for (unsigned i = 0; i < sizeof map / sizeof *map; i++) {
         const char *v = lookup(map[i][0]);
         if (v && !raven_env(map[i][1])) SetEnvironmentVariableA(map[i][1], v);
+    }
+    // Coop tab (F1): coop = off|host|join, coop_address = host to join. Env vars (coop_*.bat) win.
+    // Browser stream (F1 Coop tab): works without the coop Mode, so mapped on its own.
+    static const char *smap[][2] = {{"stream", "RAVEN_STREAM"}, {"stream_port", "RAVEN_STREAM_PORT"}, {"stream_kbps", "RAVEN_STREAM_KBPS"}, {"stream_encoder", "RAVEN_STREAM_ENCODER"}};
+    for (unsigned i = 0; i < sizeof smap / sizeof *smap; i++) { const char *x = lookup(smap[i][0]); if (x && !raven_env(smap[i][1])) SetEnvironmentVariableA(smap[i][1], x); }
+    static const char *cmap[][2] = {{"coop_players", "RAVEN_COOP_PLAYERS"}, {"coop_port", "RAVEN_COOP_PORT"},
+                                    {"coop_delay", "RAVEN_COOP_DELAY"}, {"coop_upnp", "RAVEN_COOP_UPNP"}};
+    const char *cm = lookup("coop");
+    if (!raven_env("RAVEN_COOP") && cm && (!strcmp(cm, "host") || !strcmp(cm, "join"))) {
+        const char *ad = lookup("coop_address");
+        char v[300];
+        if (!strcmp(cm, "host")) snprintf(v, sizeof v, "host");
+        else snprintf(v, sizeof v, "join:%s", ad ? ad : "");
+        if (strcmp(v, "join:")) SetEnvironmentVariableA("RAVEN_COOP", v);
+        else raven_log("[coop] Coop tab says join, but no host address is set: coop off\n");
+        for (unsigned i = 0; i < sizeof cmap / sizeof *cmap; i++) {
+            const char *x = lookup(cmap[i][0]);
+            if (x && !raven_env(cmap[i][1])) SetEnvironmentVariableA(cmap[i][1], x);
+        }
     }
     extern void ravenui_start(void);
     ravenui_start();

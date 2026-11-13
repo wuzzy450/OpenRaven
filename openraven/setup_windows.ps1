@@ -6,9 +6,12 @@
 # 2. Starts openraven\win\ravenloader.exe.
 # 3. After the first good run, offers a desktop shortcut (asked once).
 # Paths use -LiteralPath everywhere: the game folder names contain [ ] brackets.
-param([string[]]$Archives)
+param([string[]]$Archives, [string]$Root)
 $ErrorActionPreference = 'Stop'
-$Root = Split-Path -Parent $PSScriptRoot
+# Game root: the folder that holds pm\ (game data) and openraven\win\ravenloader.exe.
+# Launchers may live deeper in the tree (e.g. <game>\github_staging\), so they pass -Root
+# explicitly; otherwise default to the parent of this script (<game>\openraven\setup_windows.ps1).
+if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
 $Dec  = Join-Path $Root 'openraven\3.11-dec\pm\g7\halo'
 $Win  = Join-Path $Root 'openraven\win'
 $Tmp  = Join-Path $Root 'openraven\_setup_tmp'
@@ -335,6 +338,15 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $Root 'pm\g7\dump'), (Join-Path $Root 'pm\g7\halo\pmuser\messages') | Out-Null
 
     Say 'Starting the game. F1 = settings overlay. Log: ravenloader.log in the game folder.' Green
+    # Keep the installed loader current: if the dev tree (github_staging\openraven\win) has a newer
+    # ravenloader.exe, use it. The installed one may otherwise be an older release build that lacks
+    # newer features (4-player cabinet, coop), which then silently runs as the plain 2-player game.
+    $staging = Join-Path $Root 'github_staging\openraven\win\ravenloader.exe'
+    $installed = Join-Path $Win 'ravenloader.exe'
+    if ((Test-Path -LiteralPath $staging) -and (Get-Item -LiteralPath $staging).LastWriteTime -gt (Get-Item -LiteralPath $installed).LastWriteTime) {
+        Copy-Item -LiteralPath $staging -Destination $installed -Force
+        Say 'Updated openraven\win\ravenloader.exe from github_staging (newer build).' Yellow
+    }
     $ErrorActionPreference = 'Continue'   # the game writes to the console; that is not an error
     Set-Location -LiteralPath $Root       # ravenloader.log goes to the game folder
     & (Join-Path $Win 'ravenloader.exe') $Root

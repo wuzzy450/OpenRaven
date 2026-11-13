@@ -4,6 +4,7 @@
 //   glUseProgram / glUniformMatrix4fv -> ravenfsr_use_program / ravenfsr_matrix (jitter, projection)
 //   glDraw* -> ravenfsr_draw (skip the engine's TAA pass, run FSR 2 instead)
 //   glActiveTexture / glBindTexture -> which texture is on which unit; tonemap gets the FSR output
+#include <math.h>
 #include <windows.h>
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -22,6 +23,7 @@ GLuint ravenfsr_bind_texture(GLuint tex);
 void ravenfsr_frame_end(void);
 int ravenfg_wanted(void);
 void ravenfg_draw(GLuint prog, GLuint fbo);
+static void vp_draw(void);
 static int g_fg = -1;
 static GLuint cur_prog, cur_fbo;
 static void fgdraw(void) {
@@ -55,6 +57,7 @@ static SV void h_glUseProgram(GLuint p) {
 static SV void h_glUniformMatrix4fv(GLint loc, GLsizei n, GLboolean tr, const GLfloat *m) {
     REAL(glUniformMatrix4fv, PFNGLUNIFORMMATRIX4FVPROC);
     if (fsr() && n == 1 && !tr) ravenfsr_matrix(loc, m);
+    if (n >= 1 && m) { extern float g_last_m[16]; extern int g_last_tr; memcpy(g_last_m, m, 64); g_last_tr = tr; }
     r_glUniformMatrix4fv(loc, n, tr, m);
 }
 static SV void h_glActiveTexture(GLenum u) {
@@ -71,29 +74,271 @@ static SV void h_glBindTexture(GLenum t, GLuint x) {
     }
     r_glBindTexture(t, x);
 }
+// Hybrid 4-player mission view (raven_view 2, ravengfx_win.c): the 2D layer (fixed-function
+// draws, program 0, to the screen at full size) is authored for 32:9. Draw it into the middle
+// 32:9 band of the 16:9 screen so HUDs and crosshairs keep their shape and line up with the
+// vert+ 3D view (whose middle band is exactly the cabinet's view).
+extern int raven_view;
+extern volatile int raven_shadow_seen;
+extern int ravengfx_res_w, ravengfx_res_h;
+typedef void (APIENTRY *t_vp2d)(GLint, GLint, GLsizei, GLsizei);
+static GLint g_vp[4];
+static int g_screen_draws;   // draws to the screen this frame (reset in vptrace_frame_end)
+static int band2d_begin(void) {
+    if (raven_view < 1 || raven_view > 4) return 0;
+    static long nd, nf, np, nv, ok;
+    if (++nd % 20000 == 0)
+        raven_log("[band2d] draws %ld: fbo!=0 %ld, 3D picture %ld, viewport not full %ld, banded %ld (last vp %d %d %d %d prog %u fbo %u)\n",
+                  nd, nf, np, nv, ok, g_vp[0], g_vp[1], g_vp[2], g_vp[3], cur_prog, cur_fbo);
+    if (cur_fbo != 0) { nf++; return 0; }
+    // the first two screen draws each frame are the game's 3D picture (composite + post pass):
+    // full screen; everything after them is the 2D layer
+    // Some frames have only ONE picture draw: the 2nd screen draw is then already the first HUD
+    // item (a join-panel portrait, program 36 - the game's 2D program) and must not be kept full
+    // screen, or that portrait is stretched. So the picture ends at the first program-36 draw.
+    if (cur_prog == 36) g_screen_draws = 99;
+    if (++g_screen_draws <= 2) {
+        static int nl;
+        if (nl++ < 6) raven_log("[band2d] screen draw %d uses program %u (kept full screen)\n", g_screen_draws, cur_prog);
+        np++; return 0;
+    }
+    int W = ravengfx_res_w, H = ravengfx_res_h;
+    if (g_vp[0] != 0 || g_vp[1] != 0 || g_vp[2] != W || g_vp[3] != H) { nv++; return 0; }
+    ok++;
+    int bh = (int)((long long)W * 9 / 32);
+    if (bh >= H) return 0;
+    return 1;
+}
+// Where one 2D item goes (each item moves as a whole, nothing is cut):
+//  menu view            - viewport twice as wide: the left cabinet screen fills the screen;
+//  mission select view  - the middle 32:9 band;
+//  mission view         - the item's position on the cabinet screen (its box through the matrix
+//                         the game set for it) decides: near the top -> pinned to the top edge,
+//                         near the bottom -> pinned to the bottom edge, full height (damage
+//                         tint) -> stretched over the whole screen, else (crosshairs, prompts)
+//                         the middle band, where it lines up with the 3D view. Crosshairs
+//                         (square ~124-unit quads) always stay in the middle so aim matches.
+float g_last_m[16]; int g_last_tr;
+volatile int raven_place_req;
+static int g_dm_first, g_dm_count, g_dm_indexed;
+static int draw_bbox(float *x0, float *y0, float *x1, float *y1);
+static GLboolean g_sc_on; static GLint g_sc[4];
+static float hud_top = -2, hud_bot;
+static int g_bbox_ok;
+static int place_class_c(float *cc) {   // 0 follow centre (*cc), 1 top, 2 bottom, 3 full screen
+    float x0, y0, x1, y1;
+    *cc = 0;
+    g_bbox_ok = draw_bbox(&x0, &y0, &x1, &y1);
+    if (!g_bbox_ok) {
+        if (raven_place_req) raven_log("[place] prog %u n %d box unreadable (vbo/indexed)\n", cur_prog, g_dm_count);
+        return 0;
+    }
+    float w = x1 - x0, h = y1 - y0;
+    int xhair = w > 100 && w < 150 && h > 100 && h < 150 && w / h > 0.9f && w / h < 1.1f;
+    const float *m = g_last_m;
+    float lo = 1e9f, hi = -1e9f;
+    for (int c = 0; c < 4; c++) {
+        float x = c & 1 ? x1 : x0, y = c & 2 ? y1 : y0, cy, cw;
+        if (!g_last_tr) { cy = m[1] * x + m[5] * y + m[13]; cw = m[3] * x + m[7] * y + m[15]; }
+        else            { cy = m[4] * x + m[5] * y + m[7];  cw = m[12] * x + m[13] * y + m[15]; }
+        if (cw > 1e-6f || cw < -1e-6f) cy /= cw;
+        if (cy < lo) lo = cy; if (cy > hi) hi = cy;
+    }
+    if (hud_top < -1) {
+        const char *e = raven_env("RAVEN_HUDSTRIP");   // ndc thresholds: top,bottom (default 0.6,-0.55)
+        hud_top = 0.6f; hud_bot = -0.55f;
+        if (e) sscanf(e, "%f,%f", &hud_top, &hud_bot);
+    }
+    float c = (lo + hi) / 2;
+    {   // RAVEN_PLACELOG=1: every 30th mission frame (40 times), each item's box and placement
+        static int on = -1, dumps; static long last = -1; long vp_frame_now(void);
+        if (on < 0) on = raven_env("RAVEN_PLACELOG") != NULL;
+        long f = vp_frame_now();
+        static long req_fr = -1;   // F12 (shim_glx.c) asks for one frame's dump
+        if (raven_place_req && req_fr < 0) req_fr = f + 1;
+        if (req_fr >= 0 && f > req_fr) { req_fr = -1; raven_place_req = 0; }
+        if (req_fr >= 0 && f == req_fr) {
+            if (f != last) { last = f; raven_log("[place] F12 frame %ld view %d\n", f, raven_view); }
+            raven_log("[place] prog %u n %d box %.0f,%.0f..%.0f,%.0f ndc y %.2f..%.2f\n",
+                      cur_prog, g_dm_count, x0, y0, x1, y1, lo, hi);
+        } else
+        if (on && raven_view == 2 && dumps < 40 && f % 30 == 0) {
+            if (f != last) { last = f; dumps++; raven_log("[place] frame %ld\n", f); }
+            raven_log("[place] prog %u n %d box %.0f,%.0f..%.0f,%.0f ndc y %.2f..%.2f tr %d m %.4f %.4f %.4f %.4f\n",
+                      cur_prog, g_dm_count, x0, y0, x1, y1, lo, hi, g_last_tr, m[1], m[5], m[13], m[15]);
+        }
+    }
+    // full-screen only for tall items centred on the screen (damage tint); a tall item sitting
+    // low/high (a join panel's animated piece) keeps its size and is pinned like the HUD bars
+    if (hi - lo > 1.5f && c > -0.3f && c < 0.3f) return 3;
+    *cc = c < -1 ? -1 : c > 1 ? 1 : c;
+    if (xhair) return 0;   // crosshairs follow the aim over the whole screen
+    int cls = c > hud_top ? 1 : c < hud_bot ? 2 : 0;
+    return cls;
+}
+static int band2d_piece(int k) {   // always 1 (draw)
+    (void)k;
+    REAL(glViewport, t_vp2d);
+    int W = ravengfx_res_w, H = ravengfx_res_h, bh = (int)((long long)W * 9 / 32), t = (H - bh) / 2;
+    glGetBooleanv(GL_SCISSOR_TEST, &g_sc_on);
+    glGetIntegerv(GL_SCISSOR_BOX, g_sc);
+    if (raven_view == 1) { r_glViewport(0, 0, 2 * W, H); return 1; }
+    if (raven_view == 4) {   // the cabinet picture (any viewport inside it) into the middle band
+        r_glViewport(g_vp[0], t + (int)((long long)g_vp[1] * bh / H), g_vp[2], (int)((long long)g_vp[3] * bh / H));
+        return 1;
+    }
+    float c;
+    if (raven_view == 3) {   // movie: overlay text ("Press RELOAD to skip") once, like the menu
+        if (place_class_c(&c) != 3 && g_bbox_ok) r_glViewport(0, 0, 2 * W, H);
+        return 1;
+    }
+    // mission: the game aims through the vert+ camera, so the aim (0..1) spans the WHOLE screen
+    // height. Move each item so its centre lands where the same spot of the cabinet screen lands
+    // on the full screen: y = t + c * (H - bh) / 2 (c = item centre, -1..1). Crosshairs then sit
+    // exactly over the aim point and HUD bars at c = +-1 end up pinned to the edges.
+    // HUD bars near the top/bottom are pinned to the edges; full-height items (damage tint)
+    // cover the whole screen.
+    switch (place_class_c(&c)) {
+    case 1: r_glViewport(0, H - bh, W, bh); break;
+    case 2: r_glViewport(0, 0, W, bh); break;
+    case 3: r_glViewport(0, 0, W, H); break;
+    default: {
+        float d = c * (H - bh) / 2;
+        r_glViewport(0, t + (int)(d < 0 ? d - 0.5f : d + 0.5f), W, bh);
+    }
+    }
+    return 1;
+}
+static void band2d_end(int on) {
+    if (!on) return;
+    REAL(glViewport, t_vp2d);
+    REAL(glScissor, t_vp2d);
+    r_glViewport(g_vp[0], g_vp[1], g_vp[2], g_vp[3]);
+    (void)r_glScissor; (void)g_sc_on;
+}
+
+// RAVEN_HUDDUMP=1: log one mission frame's 2D draws (program, count, first vertices) - debug.
+
+// Bounding box of a 2D draw's positions (attribute 0, client-side float arrays only - the
+// game's HUD uses those). Returns 0 when the data is not readable that way.
+static const void *g_dm_idx; static GLenum g_dm_itype;
+static int draw_bbox(float *x0, float *y0, float *x1, float *y1) {
+    typedef void (APIENTRY *gva_t)(GLuint, GLenum, GLint *);
+    typedef void (APIENTRY *gvp_t)(GLuint, GLenum, void **);
+    static gva_t gva; static gvp_t gvp;
+    if (!gva) { gva = (gva_t)gl_resolve("glGetVertexAttribiv"); gvp = (gvp_t)gl_resolve("glGetVertexAttribPointerv"); }
+    GLint en = 0, buf = 1, sz = 0, ty = 0, st = 0; void *ptr = NULL;
+    gva(0, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &en);
+    if (!en) return 0;
+    gva(0, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &buf);
+    gva(0, GL_VERTEX_ATTRIB_ARRAY_SIZE, &sz); gva(0, GL_VERTEX_ATTRIB_ARRAY_TYPE, &ty);
+    gva(0, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &st);
+    gvp(0, GL_VERTEX_ATTRIB_ARRAY_POINTER, &ptr);
+    if (ty != GL_FLOAT || sz < 2 || g_dm_count <= 0 || g_dm_count > 4096) return 0;
+    if (!buf && !ptr) return 0;
+    int stride = st ? st : sz * 4;
+    // vertex/index data may live in GPU buffers (e.g. the Shade turret cockpit frame): read
+    // those back with glGetBufferSubData
+    typedef void (APIENTRY *gbs_t)(GLenum, GLintptr, GLsizeiptr, void *);
+    typedef void (APIENTRY *bb_t)(GLenum, GLuint);
+    static gbs_t gbs; static bb_t bb;
+    if (!gbs) { gbs = (gbs_t)gl_resolve("glGetBufferSubData"); bb = (bb_t)gl_resolve("glBindBuffer"); }
+    GLint eb = 0, pab = 0;
+    if (g_dm_indexed) glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &eb);
+    if (g_dm_indexed && !eb && !g_dm_idx) return 0;
+    if ((buf || eb) && (!gbs || !bb)) return 0;
+    static unsigned idxbuf[4096];
+    if (g_dm_indexed) {
+        int isz = g_dm_itype == GL_UNSIGNED_SHORT ? 2 : g_dm_itype == GL_UNSIGNED_INT ? 4 : 1;
+        static unsigned char raw[4096 * 4];
+        if (eb) gbs(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)g_dm_idx, (GLsizeiptr)g_dm_count * isz, raw);
+        else memcpy(raw, g_dm_idx, (size_t)g_dm_count * isz);
+        for (int k = 0; k < g_dm_count; k++)
+            idxbuf[k] = isz == 2 ? ((unsigned short *)raw)[k] : isz == 4 ? ((unsigned *)raw)[k] : raw[k];
+    } else for (int k = 0; k < g_dm_count; k++) idxbuf[k] = (unsigned)(g_dm_first + k);
+    if (buf) { glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &pab); bb(GL_ARRAY_BUFFER, (GLuint)buf); }
+    *x0 = *y0 = 1e30f; *x1 = *y1 = -1e30f;
+    for (int k = 0; k < g_dm_count; k++) {
+        float qv[2]; const float *q = qv;
+        size_t off = (size_t)idxbuf[k] * stride;
+        if (buf) gbs(GL_ARRAY_BUFFER, (GLintptr)ptr + (GLintptr)off, 8, qv);
+        else q = (const float *)((const char *)ptr + off);
+        if (q[0] < *x0) *x0 = q[0]; if (q[0] > *x1) *x1 = q[0];
+        if (q[1] < *y0) *y0 = q[1]; if (q[1] > *y1) *y1 = q[1];
+    }
+    if (buf) bb(GL_ARRAY_BUFFER, (GLuint)pab);
+    return 1;
+}
+long vp_frame_now(void);
+static void hud_dump(void) {
+    static int on = -1, frames, done;
+    static long fr_seen = -1;
+    if (on < 0) on = raven_env("RAVEN_HUDDUMP") != NULL;
+    if (!on || done || raven_view != 2) return;
+    long f = vp_frame_now();
+    if (f != fr_seen) { fr_seen = f; if (++frames == 1200) raven_log("[huddump] frame %ld\n", f); if (frames > 1200) done = 1; }
+    if (frames != 1200) return;
+    typedef void (APIENTRY *gva_t)(GLuint, GLenum, GLint *);
+    typedef void (APIENTRY *gvp_t)(GLuint, GLenum, void **);
+    typedef void (APIENTRY *gbs_t)(GLenum, GLintptr, GLsizeiptr, void *);
+    typedef void (APIENTRY *bb_t)(GLenum, GLuint);
+    gva_t gva = (gva_t)gl_resolve("glGetVertexAttribiv");
+    gvp_t gvp = (gvp_t)gl_resolve("glGetVertexAttribPointerv");
+    gbs_t gbs = (gbs_t)gl_resolve("glGetBufferSubData");
+    bb_t bb = (bb_t)gl_resolve("glBindBuffer");
+    char line[700]; int o = snprintf(line, sizeof line, "[huddump] prog %u %s count %d:", cur_prog, g_dm_indexed ? "idx" : "arr", g_dm_count);
+    for (int a = 0; a < 3; a++) {
+        GLint en = 0, buf = 0, sz = 0, ty = 0, st = 0; void *ptr = NULL;
+        gva(a, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &en);
+        if (!en) continue;
+        gva(a, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &buf); gva(a, GL_VERTEX_ATTRIB_ARRAY_SIZE, &sz);
+        gva(a, GL_VERTEX_ATTRIB_ARRAY_TYPE, &ty); gva(a, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &st);
+        gvp(a, GL_VERTEX_ATTRIB_ARRAY_POINTER, &ptr);
+        o += snprintf(line + o, sizeof line - o, " a%d(buf %d sz %d ty %x st %d off %p)", a, buf, sz, ty, st, ptr);
+        if (a == 0 && ty == GL_FLOAT && sz >= 2 && buf && !g_dm_indexed) {
+            int stride = st ? st : sz * 4, n = g_dm_count < 6 ? g_dm_count : 6;
+            float v[4]; GLint pb = 0; glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &pb);
+            bb(GL_ARRAY_BUFFER, buf);
+            for (int k = 0; k < n && o < 650; k++) {
+                gbs(GL_ARRAY_BUFFER, (GLintptr)ptr + (GLintptr)(g_dm_first + k) * stride, 8, v);
+                o += snprintf(line + o, sizeof line - o, " (%.1f,%.1f)", v[0], v[1]);
+            }
+            bb(GL_ARRAY_BUFFER, pb);
+        }
+    }
+    float bx0, by0, bx1, by1;
+    if (draw_bbox(&bx0, &by0, &bx1, &by1)) o += snprintf(line + o, sizeof line - o, " BBOX %.1f %.1f .. %.1f %.1f", bx0, by0, bx1, by1);
+    raven_log("%s\n", line);
+}
+#define BAND2D(call) do { int bd_ = band2d_begin(); if (bd_) hud_dump(); \
+    if (bd_) { for (int k_ = 0; k_ < bd_; k_++) { if (band2d_piece(k_)) call; } band2d_end(1); } else call; } while (0)
 static SV void h_glDrawElements(GLenum m, GLsizei c, GLenum t, const void *i) {
     REAL(glDrawElements, t_drawel);
-    fgdraw();
+    fgdraw(); vp_draw();
     if (fsr() && ravenfsr_draw()) return;
-    r_glDrawElements(m, c, t, i);
+    g_dm_count = c; g_dm_indexed = 1; g_dm_idx = i; g_dm_itype = t;
+    BAND2D(r_glDrawElements(m, c, t, i));
 }
 static SV void h_glDrawArrays(GLenum m, GLint f, GLsizei c) {
     REAL(glDrawArrays, t_drawarr);
-    fgdraw();
+    fgdraw(); vp_draw();
     if (fsr() && ravenfsr_draw()) return;
-    r_glDrawArrays(m, f, c);
+    g_dm_first = f; g_dm_count = c; g_dm_indexed = 0;
+    BAND2D(r_glDrawArrays(m, f, c));
 }
 static SV void h_glDrawElementsInstanced(GLenum m, GLsizei c, GLenum t, const void *i, GLsizei n) {
     REAL(glDrawElementsInstanced, PFNGLDRAWELEMENTSINSTANCEDPROC);
-    fgdraw();
+    fgdraw(); vp_draw();
     if (fsr() && ravenfsr_draw()) return;
-    r_glDrawElementsInstanced(m, c, t, i, n);
+    g_dm_count = c; g_dm_indexed = 1; g_dm_idx = i; g_dm_itype = t;
+    BAND2D(r_glDrawElementsInstanced(m, c, t, i, n));
 }
 static SV void h_glDrawRangeElements(GLenum m, GLuint a, GLuint b, GLsizei c, GLenum t, const void *i) {
     REAL(glDrawRangeElements, PFNGLDRAWRANGEELEMENTSPROC);
-    fgdraw();
+    fgdraw(); vp_draw();
     if (fsr() && ravenfsr_draw()) return;
-    r_glDrawRangeElements(m, a, b, c, t, i);
+    g_dm_count = c; g_dm_indexed = 1; g_dm_idx = i; g_dm_itype = t;
+    BAND2D(r_glDrawRangeElements(m, a, b, c, t, i));
 }
 
 // HUD/menu sprites (the Ramos/Lang JOIN portraits): the engine leaves them on GL_REPEAT, and their
@@ -199,7 +444,43 @@ static GLuint screen_fbo(void) {
     raven_log("[hdr] game screen -> RGBA16F framebuffer %u (%dx%d)\n", scr_fbo, w, h);
     return scr_fbo;
 }
+// RAVEN_VPTRACE=n: log frame n's framebuffer binds, viewports and draw counts (how the game lays out a frame).
+static int vp_trace = -1, vp_on, vp_draws; static long vp_frame;
+static void vp_flush(void) { if (vp_on && vp_draws) { raven_log("[vptrace]   %d draws\n", vp_draws); vp_draws = 0; } }
+static void vp_draw(void) { if (vp_on) vp_draws++; }
+static long g_frames_all;
+long vp_frame_now(void) { return g_frames_all; }
+void vptrace_frame_end(void) {
+    g_screen_draws = 0; g_frames_all++;
+    static long vp_list[16]; static int vp_n;
+    if (vp_trace < 0) {   // RAVEN_VPTRACE=n or n,m,... (up to 16 frames)
+        const char *e = raven_env("RAVEN_VPTRACE");
+        vp_trace = e ? atoi(e) : 0;
+        while (e && *e && vp_n < 16) { vp_list[vp_n++] = strtol(e, (char **)&e, 10); if (*e == ',') e++; else break; }
+        if (vp_trace) raven_log("[vptrace] tracing %d frame(s), first %ld\n", vp_n, vp_list[0]);
+    }
+    if (!vp_trace) return;
+    vp_flush();
+    vp_frame++;
+    vp_on = 0;
+    for (int i = 0; i < vp_n; i++) if (vp_list[i] == vp_frame) vp_on = 1;
+    if (vp_on) raven_log("[vptrace] frame %ld\n", vp_frame);
+}
+typedef void (APIENTRY *t_viewport)(GLint, GLint, GLsizei, GLsizei);
+static SV void h_glViewport(GLint x, GLint y, GLsizei w, GLsizei h) {
+    REAL(glViewport, t_viewport);
+    if (vp_on) { vp_flush(); raven_log("[vptrace] viewport %d %d %d %d (fbo %u, program %u)\n", x, y, w, h, cur_fbo, cur_prog); }
+    g_vp[0] = x; g_vp[1] = y; g_vp[2] = w; g_vp[3] = h;
+    if (w == 8192 && h == 8192) raven_shadow_seen = 1;   // mission shadow map
+    r_glViewport(x, y, w, h);
+}
+static SV void h_glScissor(GLint x, GLint y, GLsizei w, GLsizei h) {
+    REAL(glScissor, t_viewport);
+    if (vp_on) { vp_flush(); raven_log("[vptrace] scissor %d %d %d %d\n", x, y, w, h); }
+    r_glScissor(x, y, w, h);
+}
 static SV void h_glBindFramebuffer(GLenum t, GLuint f) {
+    if (vp_on) { vp_flush(); raven_log("[vptrace] bind fbo %u (%s)\n", f, t == GL_READ_FRAMEBUFFER ? "read" : "draw"); }
     REAL(glBindFramebuffer, PFNGLBINDFRAMEBUFFERPROC);
     GLuint real = f;
     if (!f) { GLuint s = screen_fbo(); if (s) real = s; }
@@ -294,10 +575,13 @@ static SV void h_glShaderSource(GLuint sh, GLsizei n, const GLchar *const *str, 
 // Called once per presented frame (ravengfx_frame).
 void ravengl_frame_end(void) {
     if (g_fsr > 0) ravenfsr_frame_end();
+    vptrace_frame_end();
 }
 
 const shim_entry shims_glhook[] = {
     {"glUseProgram", (void *)h_glUseProgram},
+    {"glViewport", (void *)h_glViewport},
+    {"glScissor", (void *)h_glScissor},
     {"glShaderSource", (void *)h_glShaderSource},
     {"glUniformMatrix4fv", (void *)h_glUniformMatrix4fv},
     {"glActiveTexture", (void *)h_glActiveTexture},

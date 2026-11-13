@@ -204,6 +204,8 @@ static DWORD WINAPI close_watchdog(void *arg) {
     (void)arg;
     Sleep(1500);
     raven_log("WM_CLOSE: game did not exit, ending the process\n");
+    extern void coopnet_shutdown(void);
+    coopnet_shutdown();
     fflush(NULL);
     TerminateProcess(GetCurrentProcess(), 0);
     return 0;

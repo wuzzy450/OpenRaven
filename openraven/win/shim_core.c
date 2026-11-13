@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+void raven_time_trace(const char *fn, void *ra);
+#define TT(name) raven_time_trace(name, __builtin_return_address(0))
 #include <time.h>
 #include <ctype.h>
 
@@ -19,7 +21,7 @@
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 void raven_log(const char *fmt, ...) {
     if (g_log == INVALID_HANDLE_VALUE)
-        g_log = CreateFileA("ravenloader.log", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+        g_log = CreateFileA(getenv("RAVEN_LOG") ? getenv("RAVEN_LOG") : "ravenloader.log", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     char buf[4096];
     va_list ap;
@@ -80,8 +82,58 @@ static void write_cpuinfo(void) {
     fclose(f);
 }
 
+// Online coop: every PC must start from the same save files (operator settings, audits, high scores),
+// or the game copies drift apart. So in coop the game's save folder pmuser/ is swapped for an empty
+// folder <root>/coop_saves/pmuser that is wiped at every start. The player's real saves stay untouched.
+static void rm_tree(const char *dir) {
+    char pat[MAX_PATH * 2], sub[MAX_PATH * 2];
+    WIN32_FIND_DATAA fd;
+    snprintf(pat, sizeof pat, "%s/*", dir);
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            snprintf(sub, sizeof sub, "%s/%s", dir, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) rm_tree(sub);
+            else { SetFileAttributesA(sub, FILE_ATTRIBUTE_NORMAL); DeleteFileA(sub); }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryA(dir);
+}
+static char g_coop_dir[MAX_PATH * 2];
+static int g_coop_saves;
+// main.c calls this once graphics.ini has set RAVEN_COOP (ravengfx_install), before the game runs.
+void raven_coop_saves_init(void) {
+    {
+        const char *c = raven_env("RAVEN_COOP"), *k = raven_env("RAVEN_COOP_KEEPSAVES");
+        int on = c && *c && strcmp(c, "off") && !(k && *k == '1');
+        if (on) {
+            // Host and joiners get their own folder, so two copies on one PC do not share one.
+            char d[MAX_PATH * 2];
+            // RAVEN_COOP_SAVENAME=x: own folder name, for several joiners on one PC (coop_saves_x).
+            const char *sn = raven_env("RAVEN_COOP_SAVENAME");
+            snprintf(g_coop_dir, sizeof g_coop_dir, "%s/coop_saves_%s", g_root,
+                     sn && *sn ? sn : strncmp(c, "host", 4) ? "join" : "host");
+            rm_tree(g_coop_dir);
+            CreateDirectoryA(g_coop_dir, NULL);
+            snprintf(d, sizeof d, "%s/pmuser", g_coop_dir);
+            CreateDirectoryA(d, NULL);
+            raven_log("[coop] using a fresh save folder %s (your normal saves are not touched)\n", d);
+        }
+        g_coop_saves = on;
+    }
+}
+
 const char *lx_path(const char *p, char *buf, size_t cap) {
     if (!p) return NULL;
+    if (g_coop_saves) {
+        const char *rest = NULL;
+        if (!strncmp(p, "/pm/g7/halo/pmuser", 18) && (!p[18] || p[18] == '/')) rest = p + 18;
+        else if (!strncmp(p, "pmuser", 6) && (!p[6] || p[6] == '/')) rest = p + 6;
+        else if (!strncmp(p, "./pmuser", 8) && (!p[8] || p[8] == '/')) rest = p + 8;
+        if (rest) { snprintf(buf, cap, "%s/pmuser%s", g_coop_dir, rest); return buf; }
+    }
     if (!strcmp(p, "/proc/cpuinfo")) snprintf(buf, cap, "%s/ravenloader_proc/cpuinfo", g_root);
     else if (p[0] == '/') snprintf(buf, cap, "%s%s", g_root, p);
     else snprintf(buf, cap, "%s", p);
@@ -179,16 +231,42 @@ static SV void s_stack_chk_fail(void) {
 
 // ---- stdio ---------------------------------------------------------------------
 
+// Hybrid 4-player mode (RAVEN_WIDE4=hybrid): the game runs at the screen's 16:9 shape, so play
+// the 16:9 cutscene movies the 2-player cabinet uses (X_1080.webm, 1920x1080; X_wide.webm -> X.webm)
+// instead of the 32:9 ones. raven_movie_open tells the presenter a movie is on screen.
+volatile int raven_movie_open;
+static FILE *movie_f;
+static int hybrid16(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = raven_env("RAVEN_WIDE4"); on = e && !strcmp(e, "hybrid"); }
+    return on;
+}
+static const char *movie16(const char *p, char *buf, size_t cap) {
+    size_t n = strlen(p);
+    if (!hybrid16() || n < 6 || n + 8 > cap || !strstr(p, "/webm/") || strcmp(p + n - 5, ".webm")) return p;
+    if (n > 10 && !strcmp(p + n - 10, "_wide.webm")) snprintf(buf, cap, "%.*s.webm", (int)(n - 10), p);
+    else if (n > 10 && !strcmp(p + n - 10, "_1080.webm")) return p;
+    else snprintf(buf, cap, "%.*s_1080.webm", (int)(n - 5), p);
+    char wb[MAX_PATH * 2];
+    const char *w = lx_path(buf, wb, sizeof wb);
+    return GetFileAttributesA(w) != INVALID_FILE_ATTRIBUTES ? buf : p;
+}
 static SV FILE *s_fopen(const char *p, const char *m) {
+    char mb[1024];
+    p = movie16(p, mb, sizeof mb);
     PATH(p);
     char mode[16];
     snprintf(mode, sizeof mode, "%s%s", m, strchr(m, 'b') ? "" : "b");
     FILE *f = fopen(w_p, mode);
     if (!f) lx_set_errno_from_crt();
     raven_log("fopen(%s, %s) -> %p\n", p, m, (void *)f);
+    if (f && strchr(m, 'b') && strstr(p, "/webm/")) { movie_f = f; raven_movie_open = 1; }
     return f;
 }
-static SV int s_fclose(FILE *f) { return fclose(f); }
+static SV int s_fclose(FILE *f) {
+    if (f && f == movie_f) { movie_f = NULL; raven_movie_open = 0; }
+    return fclose(f);
+}
 static SV size_t s_fread(void *b, size_t s, size_t n, FILE *f) { return fread(b, s, n, f); }
 static SV size_t s_fwrite(const void *b, size_t s, size_t n, FILE *f) { return fwrite(b, s, n, f); }
 static SV int s_fseek(FILE *f, long long o, int w) { return _fseeki64(f, o, w); }
@@ -396,7 +474,8 @@ static void tm_out(lx_tm *o, const struct tm *t) {
     memcpy(o, t, 9 * sizeof(int));
     o->zone = "UTC";
 }
-static SV long long s_time(long long *t) { long long v = _time64(NULL); if (t) *t = v; return v; }
+int coop_vtime_us(uint64_t *us);   // coop_win.c: virtual wall clock, 0 = off
+static SV long long s_time(long long *t) { TT("time"); uint64_t vu; long long v = coop_vtime_us(&vu) ? (long long)(vu / 1000000) : _time64(NULL); if (t) *t = v; return v; }
 static SV lx_tm *s_localtime_r(const long long *t, lx_tm *o) { struct tm w; __time64_t v = *t; _localtime64_s(&w, &v); tm_out(o, &w); return o; }
 static SV lx_tm *s_gmtime_r(const long long *t, lx_tm *o) { struct tm w; __time64_t v = *t; _gmtime64_s(&w, &v); tm_out(o, &w); return o; }
 static lx_tm g_tm;
@@ -408,26 +487,77 @@ static SV long long s_mktime(lx_tm *o) {
     memcpy(o, &w, 9 * sizeof(int));
     return r;
 }
-static SV long long s_clock(void) { return (long long)clock() * (1000000 / CLOCKS_PER_SEC); }
+// RAVEN_TIMETRACE=1: count time-function calls per caller, dump every 10 s (coop determinism work).
+#include "elfload.h"
+#define TT_N 512
+static struct { const char *fn; void *ra; volatile long n; } g_tt[TT_N];
+static int g_tt_on = -1;
+static SRWLOCK g_tt_lock = SRWLOCK_INIT;
+void raven_time_trace_enable(int on) { g_tt_on = on; }
+void raven_time_trace(const char *fn, void *ra) {
+    if (g_tt_on <= 0) return;
+    static ULONGLONG last;
+    AcquireSRWLockExclusive(&g_tt_lock);
+    unsigned h = (unsigned)(((uintptr_t)ra >> 2) ^ (uintptr_t)fn) % TT_N;
+    for (int k = 0; k < TT_N; k++, h = (h + 1) % TT_N) {
+        if (!g_tt[h].ra) { g_tt[h].fn = fn; g_tt[h].ra = ra; }
+        if (g_tt[h].ra == ra && g_tt[h].fn == fn) { g_tt[h].n++; break; }
+    }
+    ULONGLONG now = GetTickCount64();
+    if (!last) last = now;
+    if (now - last >= 10000) {
+        last = now;
+        raven_log("[timetrace] --- per 10s ---\n");
+        for (int i = 0; i < TT_N; i++)
+            if (g_tt[i].ra && g_tt[i].n) {
+                raven_log("[timetrace] %-14s %6ld  %s\n", g_tt[i].fn, g_tt[i].n, elf_module_name(g_tt[i].ra));
+                g_tt[i].n = 0;
+            }
+    }
+    ReleaseSRWLockExclusive(&g_tt_lock);
+}
+
+static SV long long s_clock(void) { TT("clock"); return (long long)clock() * (1000000 / CLOCKS_PER_SEC); }
 
 typedef struct { long long tv_sec, tv_usec; } lx_timeval;
 static SV int s_gettimeofday(lx_timeval *tv, void *tz) {
-    (void)tz;
+    (void)tz; TT("gettimeofday");
     FILETIME ft;
     GetSystemTimePreciseAsFileTime(&ft);
     unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32 | ft.dwLowDateTime) / 10 - 11644473600000000ULL;
+    uint64_t vu;
+    if (coop_vtime_us(&vu)) t = vu;
     if (tv) { tv->tv_sec = t / 1000000; tv->tv_usec = t % 1000000; }
     return 0;
 }
 
 typedef struct { long long sec, nsec; } lx_timespec;
 static SV int s_nanosleep(const lx_timespec *r, lx_timespec *rem) {
+    TT("nanosleep");
     if (rem) rem->sec = rem->nsec = 0;
     long long ms = r->sec * 1000 + r->nsec / 1000000;
+    extern void raven_thread_blk(int kind);
+    extern int raven_gate_sleep(unsigned us);
+    extern void raven_gate_main_sleep(void);
+    if (raven_gate_sleep(r->sec ? 1000000u : (unsigned)(r->nsec / 1000))) return 0;
+    raven_gate_main_sleep();
+    { extern void raven_gate_main_sleep_us(unsigned); raven_gate_main_sleep_us(r->sec ? 1000000u * (unsigned)r->sec : (unsigned)(r->nsec / 1000)); }
+    raven_thread_blk(4);
     Sleep(ms > 0 ? (DWORD)ms : (r->nsec ? 1 : 0));
+    raven_thread_blk(0);
     return 0;
 }
-static SV int s_usleep(unsigned us) { Sleep(us >= 1000 ? us / 1000 : (us ? 1 : 0)); return 0; }
+void raven_thread_blk(int kind);   // shim_thread.c
+int raven_gate_sleep(unsigned us);   // shim_thread.c: coop gate
+void raven_gate_main_sleep(void);
+static SV int s_usleep(unsigned us) {
+    TT("usleep");
+    if (raven_gate_sleep(us)) return 0;
+    raven_gate_main_sleep();
+    { extern void raven_gate_main_sleep_us(unsigned); raven_gate_main_sleep_us(us); }
+    raven_thread_blk(4); Sleep(us >= 1000 ? us / 1000 : (us ? 1 : 0)); raven_thread_blk(0);
+    return 0;
+}
 static SV unsigned s_sleep(unsigned s) { Sleep(s * 1000); return 0; }
 static SV int s_sched_yield(void) { SwitchToThread(); return 0; }
 
@@ -454,10 +584,12 @@ static SV void s_exit(int c) {
     raven_log("exit(%d)\n", c);
     for (LONG i = g_natexit - 1; i >= 0; i--)
         if (i < 1024 && g_atexit[i].fn) { void (*f)(void *) SV = g_atexit[i].fn; g_atexit[i].fn = NULL; f(g_atexit[i].arg); }
+    extern void coopnet_shutdown(void);
+    coopnet_shutdown();   // tell the other PCs, close the router port
     fflush(NULL);
     ExitProcess(c);
 }
-static SV void s__exit(int c) { raven_log("_exit(%d)\n", c); fflush(NULL); ExitProcess(c); }
+static SV void s__exit(int c) { extern void coopnet_shutdown(void); raven_log("_exit(%d)\n", c); coopnet_shutdown(); fflush(NULL); ExitProcess(c); }
 static SV long long s_sysconf(int n) {
     SYSTEM_INFO si;
     GetSystemInfo(&si);

@@ -313,8 +313,14 @@ static SV void *s_aligned_alloc(size_t al, size_t n) {
 }
 
 // ---- time ----------------------------------------------------------------
+void raven_time_trace(const char *fn, void *ra);
 static SV int s_clock_gettime(int clk, lx_timespec *ts) {
-    if (clk == 0 || clk == 8) {  // REALTIME, REALTIME_ALARM
+    raven_time_trace(clk == 0 ? "clock_gt_real" : "clock_gt_mono", __builtin_return_address(0));
+    extern int coop_vtime_us(uint64_t *us);
+    uint64_t vu;
+    if ((clk == 0 || clk == 8) && coop_vtime_us(&vu)) {
+        ts->sec = (long long)(vu / 1000000); ts->nsec = (long long)(vu % 1000000) * 1000;
+    } else if (clk == 0 || clk == 8) {  // REALTIME, REALTIME_ALARM
         FILETIME ft;
         GetSystemTimePreciseAsFileTime(&ft);
         unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32 | ft.dwLowDateTime) - 116444736000000000ULL;

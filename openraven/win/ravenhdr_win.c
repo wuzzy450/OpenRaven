@@ -55,7 +55,7 @@ GLF(void, gBindTexture, (GLenum, GLuint)) GLF(void, gTexImage2D, (GLenum, GLint,
 GLF(void, gTexParameteri, (GLenum, GLenum, GLint)) GLF(void, gGetIntegerv, (GLenum, GLint *))
 GLF(GLboolean, gIsEnabled, (GLenum)) GLF(void, gEnable, (GLenum)) GLF(void, gDisable, (GLenum))
 GLF(void, gViewport, (GLint, GLint, GLsizei, GLsizei)) GLF(void, gDrawArrays, (GLenum, GLint, GLsizei))
-GLF(void, gReadBuffer, (GLenum)) GLF(void, gReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) GLF(void, gColorMask, (GLboolean, GLboolean, GLboolean, GLboolean))
+GLF(void, gReadBuffer, (GLenum)) GLF(void, gReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) GLF(void, gColorMask, (GLboolean, GLboolean, GLboolean, GLboolean)) GLF(void, gClearBufferfv, (GLenum, GLint, const GLfloat *))
 
 static const char *vs = "#version 330 core\nvoid main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
 static const char *fs =
@@ -95,6 +95,7 @@ static int load_gl(void) {
     L(gActiveTexture, "glActiveTexture") L(gBindSampler, "glBindSampler") L(gGenTextures, "glGenTextures")
     L(gDeleteTextures, "glDeleteTextures") L(gBindTexture, "glBindTexture") L(gTexImage2D, "glTexImage2D")
     gReadPixels = (__typeof__(gReadPixels))gl_resolve("glReadPixels");
+    gClearBufferfv = (__typeof__(gClearBufferfv))gl_resolve("glClearBufferfv");
     L(gTexParameteri, "glTexParameteri") L(gGetIntegerv, "glGetIntegerv") L(gIsEnabled, "glIsEnabled")
     L(gEnable, "glEnable") L(gDisable, "glDisable") L(gViewport, "glViewport") L(gDrawArrays, "glDrawArrays")
     L(gReadBuffer, "glReadBuffer") L(gColorMask, "glColorMask")
@@ -228,7 +229,22 @@ static int present(HWND hw) {
     if (sfb) ravengl_screen_size(&sw, &sh);
     gBindFramebuffer(GL_READ_FRAMEBUFFER, sfb); gGetIntegerv(GL_READ_BUFFER, &rb); gReadBuffer(sfb ? GL_COLOR_ATTACHMENT0 : GL_BACK);
     gBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb_src); gFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, srct, 0);
-    gBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh, GL_COLOR_BUFFER_BIT, GL_NEAREST);   // same place as on the window
+    // Fit the picture into the window keeping its aspect, centred - same placement as the
+    // non-HDR present_scaled(). The old 1:1 blit was fine while the picture always equalled
+    // the window; with the 4-player 32:9 fullscreen (1080-high picture, 2160-high window) it
+    // anchored the picture to the bottom (GL origin is bottom-left) with a black top half.
+    extern int raven_view;
+    extern int raven_src_w(int);
+    extern void raven_fit_rect(int, int, int, int, int *, int *, int *, int *);
+    if (sw > 0 && sh > 0 && (sw != w || sh != h)) {
+        int dx, dy, dw, dh;
+        raven_fit_rect(sw, sh, w, h, &dx, &dy, &dw, &dh);
+        static const GLfloat black[4] = {0, 0, 0, 1};
+        if (gClearBufferfv) gClearBufferfv(0x1800 /* GL_COLOR */, 0, black);
+        gBlitFramebuffer(0, 0, sfb ? raven_src_w(sw) : sw, sh, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    } else {
+        gBlitFramebuffer(0, 0, sw, sh, 0, 0, sw, sh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
     gReadBuffer(rb);
     // graphics.ini HDR_STATS = 1: every 300 frames log the brightest pixel in 64 full-width rows and how
     // many go above SDR white (1.0 = paper white), i.e. the highlights SDR would clip.

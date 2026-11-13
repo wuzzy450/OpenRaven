@@ -134,6 +134,7 @@ static float sample(const void *b, int fmt, size_t i) {
     if (fmt == F_S32) return ((const int *)b)[i] / 2147483648.0f;
     return ((const short *)b)[i] / 32768.0f;
 }
+void streamweb_audio(const float *lr, unsigned frames, unsigned rate);   // streamweb_win.c
 static SV long a_writei(pcm_t *p, const void *buf, unsigned long frames) {
     unsigned ch = p->p.ch; unsigned long done = 0;
     p->started = 1;
@@ -151,6 +152,8 @@ static SV long a_writei(pcm_t *p, const void *buf, unsigned long frames) {
                 r = (r + 0.707f * c + 0.707f * sample(buf, p->p.fmt, s + 3) + 0.5f * lf) * 0.5f;
             }
             p->ring[2 * j] = l; p->ring[2 * j + 1] = r;
+            float lr[2] = {l, r};
+            streamweb_audio(lr, 1, p->p.rate);   // browser stream: the game's own sound only
         }
         p->wr += (unsigned)n; done += n;
         LeaveCriticalSection(&p->cs);
