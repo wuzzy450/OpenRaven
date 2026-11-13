@@ -14,7 +14,7 @@ set -e
 cd "$(dirname "$0")"
 
 fail=0
-dirty=$(git status --porcelain --untracked-files=all -- . ':!ravenloader.log' ':!ravenloader_proc' ':!OpenRaven.zip' ':!openraven/run_logs' | grep -v '^?? .*\.\(log\|png\|o\)$' || true)
+dirty=$(git status --porcelain --untracked-files=all -- . ':!ravenloader.log' ':!ravenloader_proc' ':!OpenRaven.zip' ':!openraven/graphics.ini' ':!stream.mp4' ':!openraven/stream.mp4' ':!openraven/run_logs' | grep -v '^?? .*\.\(log\|png\|o\)$' || true)
 if [ -n "$dirty" ]; then
     echo "Not committed yet (the zip would not have these):"
     echo "$dirty" | sed -n 1,40p   # (sed reads everything: head would cut the pipe and stop the script)
@@ -29,7 +29,7 @@ newer() {   # newer TARGET SOURCES... : prints sources changed after TARGET
 }
 w=$(newer openraven/win/ravenloader.exe openraven/win/*.c openraven/win/*.h openraven/ravenfg.c openraven/ravenfsr.cpp openraven/vk/*.c)
 if [ -n "$w" ]; then echo "openraven/win/ravenloader.exe is older than:"; echo "$w"; fail=1; fi
-l=$(newer openraven/rio2pad.so openraven/rio2pad.c; newer openraven/ravengfx.so openraven/ravengfx.c openraven/ravenhdr.c openraven/ravenui.c openraven/ravenfg.c)
+l=$(newer openraven/rio2pad.so openraven/rio2pad.c openraven/coop.c openraven/coopnet.c openraven/coopupnp.c openraven/streamweb.c openraven/streamweb.h; newer openraven/ravengfx.so openraven/ravengfx.c openraven/ravenhdr.c openraven/ravenui.c openraven/ravenfg.c openraven/ravengltrace.c openraven/streamenc.c)
 if [ -n "$l" ]; then echo "Linux .so files are older than:"; echo "$l"; fail=1; fi
 # (dual boot: if the clock was off, a fresh build can still look older - rebuild, or touch the binary)
 
