@@ -676,6 +676,19 @@ static void poll_mouse(void)
 static int trig(BYTE v) { return v * 65534 / 255 - 32767; }
 static int neg(SHORT v) { return v == -32768 ? 32767 : -v; }
 
+// RIO2PAD_PADSTART=2 (F1 Input "Gamepads start at"): pads begin at player 2, so mouse + keyboard play
+// player 1 alone. Not in online coop, where this PC's player is its first pad / mouse / keyboard.
+static int pad_first(void)
+{
+    static int f = -1;
+    if (f < 0) {
+        const char *s = raven_env("RIO2PAD_PADSTART"), *c = raven_env("RAVEN_COOP");
+        f = s && atoi(s) == 2 && !(c && *c) ? 1 : 0;
+        if (f) raven_log("[rio2pad] gamepads start at player 2 (mouse + keyboard = player 1)\n");
+    }
+    return f;
+}
+
 static void poll_pads(void)
 {
     static int was_active[MAX_PADS];
@@ -693,8 +706,9 @@ static void poll_pads(void)
     for (int p = 0; p < MAX_PADS; p++) {
         struct pad *pd = &g_pads[p];
         XINPUT_STATE st;
-        int ok = !mute && p_XInputGetState && p_XInputGetState(p, &st) == ERROR_SUCCESS;
-        if (!ok && !mute && pspad_get(next_ps, &st)) { ok = 2; next_ps++; }
+        int xi = p - pad_first();   // this player's gamepad number (-1: player 1 has none)
+        int ok = !mute && xi >= 0 && p_XInputGetState && p_XInputGetState(xi, &st) == ERROR_SUCCESS;
+        if (!ok && !mute && xi >= 0 && pspad_get(next_ps, &st)) { ok = 2; next_ps++; }
         // Browser stream (streamweb_win.c): a friend in a browser owns this player's slot.
         extern int streamweb_pad(int p, XINPUT_STATE *st, float *ax, float *ay);
         float rx, ry;

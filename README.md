@@ -6,6 +6,8 @@
 
 ▶ [Watch Mission 1 running on PC](https://youtu.be/pZ166zhaEjs) · 💬 [Discord](https://discord.gg/nuvpXycag8) for help and updates · ☕ [Support on Ko-fi](https://ko-fi.com/wuzzy450)
 
+> 🔧 **v1.1.1 Hotfix:** one player on mouse and keyboard, another on a controller, on the same PC: F1 → Input → **Gamepads start at** → `2`. See [Controls](#controls).
+>
 > 🆕 **v1.1.0 – The Online Coop Update!** Play together over the internet or your home network (up to 4 PCs, Windows and Linux mixed), let friends join from just a web browser, and play the full 4-player cabinet on one screen. See [Online coop](#online-coop) below.
 
 *Halo: Fireteam Raven* (Raw Thrills / Play Mechanix / 343 Industries, 2018) is a four-player arcade rail shooter that only ever ran on arcade cabinets. OpenRaven runs the original v3.11 cabinet game on a normal PC with a controller or keyboard, in any resolution, with modern graphics options on top.
@@ -89,7 +91,11 @@ Each controller is one player (controller 1 = player 1, and so on).
 | Insert coin *(not needed with Free Play)* | Y | 5 (player 2: 6) |
 | Settings menu | – | **F1** |
 
-The mouse and keyboard play as player 1, next to controller 1. The mouse takes over the aim when you
+The mouse and keyboard play as player 1, next to controller 1. **One player on mouse and keyboard, another on a
+controller?** In the F1 menu (Input), set **Gamepads start at** to `2`: the mouse and keyboard then play player 1
+alone, controller 1 is player 2, controller 2 is player 3, and so on. (If the controller also moves
+player 1's crosshair, Steam Input's desktop layout is moving your mouse pointer with the stick: close Steam or turn
+Steam Input off for that controller.) The mouse takes over the aim when you
 move it and gives it back when you push a stick. In the F1 menu (Input), **Mouse aim** picks
 `screen` (the crosshair follows the pointer, like the cabinet's light gun; the default), `relative`
 (the mouse pushes the crosshair, with **Mouse sensitivity**) or off.

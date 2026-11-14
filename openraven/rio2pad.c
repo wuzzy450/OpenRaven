@@ -628,6 +628,18 @@ static void hook_adj_get(void)
 }
 
 // Open any newly plugged-in, non-mouse joystick into the first free player slot.
+// RIO2PAD_PADSTART=2 (F1 Input "Gamepads start at"): pads begin at player 2, so mouse + keyboard play
+// player 1 alone. Not in online coop, where this PC's player is its first pad / mouse / keyboard.
+static int pad_first(void)
+{
+    static int f = -1;
+    if (f < 0) {
+        const char *s = getenv("RIO2PAD_PADSTART"), *c = getenv("RAVEN_COOP");
+        f = s && atoi(s) == 2 && !(c && *c) ? 1 : 0;
+        if (f) fprintf(stderr, "[rio2pad] gamepads start at player 2 (mouse + keyboard = player 1)\n");
+    }
+    return f;
+}
 static void scan_pads(void)
 {
     const char *dirs[2] = {"/dev/input", getenv("RIO2PAD_JSDIR")};
@@ -639,7 +651,7 @@ static void scan_pads(void)
             int taken = 0, slot = -1;
             for (int p = 0; p < MAX_PADS; p++) {
                 if (g_pads[p].fd >= 0 && !strcmp(g_pads[p].path, path)) taken = 1;
-                if (g_pads[p].fd == -1 && slot < 0) slot = p;
+                if (g_pads[p].fd == -1 && slot < 0 && p >= pad_first()) slot = p;
             }
             if (taken || slot < 0) continue;
             int fd = open(path, O_RDONLY | O_NONBLOCK);

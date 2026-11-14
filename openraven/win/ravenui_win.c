@@ -97,6 +97,7 @@ static item_t items[] = {
  {"Input","Aim mode","aim",T_CHOICE,1,"cursor|abs",0,0,0,"cursor","cursor: stick moves aim. abs: stick = aim"},
  {"Input","Stick speed","stick_speed",T_NUM,1,NULL,0.1f,4,0.05f,"0.25","Screen widths per second (cursor mode)"},
  {"Input","Mouse aim","mouse",T_CHOICE,1,"0|screen|relative",0,0,0,"screen","Player 1. screen: aim follows the pointer. relative: mouse moves the aim. Left fire, right reload, middle grenade"},
+ {"Input","Gamepads start at","pad_start",T_CHOICE,0,"1|2",0,0,0,"1","1: gamepad 1 = player 1, shared with mouse + keyboard. 2: mouse + keyboard play player 1 alone, gamepad 1 = player 2, gamepad 2 = player 3. Not used in online coop"},
  {"Input","Mouse sensitivity","mouse_sens",T_NUM,1,NULL,0.1f,5,0.1f,"1.0","Relative mode: 1.0 = one window width of mouse travel crosses the screen"},
  {"Overlay","Overlay size","ui_scale",T_CHOICE,1,"0.75|0.9|1.0|1.1|1.25|1.5|2.0",0,0,0,"1.0","Size of this menu. It always shrinks to fit the screen"},
  {"Cabinet","Free play","free_play",T_CHOICE,0,"0|1",0,0,0,"1",NULL},

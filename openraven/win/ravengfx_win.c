@@ -576,7 +576,7 @@ void ravengfx_install(void) {
     // Launcher/input keys from graphics.ini, like graphics.sh (env vars win). rio2pad reads them.
     static const char *map[][2] = {{"skip_boot", "RIO2PAD_SKIPBOOT"}, {"free_play", "RIO2PAD_FREEPLAY"},
                                    {"stick_speed", "RIO2PAD_STICKSPEED"}, {"aim", "RIO2PAD_AIM"},
-                                   {"mouse", "RIO2PAD_MOUSE"}, {"mouse_sens", "RIO2PAD_MOUSESENS"},
+                                   {"mouse", "RIO2PAD_MOUSE"}, {"mouse_sens", "RIO2PAD_MOUSESENS"}, {"pad_start", "RIO2PAD_PADSTART"},
                                    {"players", "RIO2PAD_PLAYERS"}, {"wide4", "RAVEN_WIDE4"}};
     for (unsigned i = 0; i < sizeof map / sizeof *map; i++) {
         const char *v = lookup(map[i][0]);
