@@ -11,3 +11,8 @@
 *.so binary
 *.so.* binary
 *.exe binary
+
+# Kept in the repo, left out of the release zip (git archive): test launchers and the release tool
+play_solo.bat export-ignore
+play_solo_fill.bat export-ignore
+make_release.sh export-ignore
