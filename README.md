@@ -6,7 +6,7 @@
 
 ▶ [Watch Mission 1 running on PC](https://youtu.be/pZ166zhaEjs) · 💬 [Discord](https://discord.gg/nuvpXycag8) for help and updates · ☕ [Support on Ko-fi](https://ko-fi.com/wuzzy450)
 
-> 🔧 **v1.1.2 Hotfix:** on Windows, `start_windows.bat` now works straight from the unzipped OpenRaven folder (v1.1.0 and v1.1.1 looked for the game one folder too high).
+> 🔧 **v1.1.2 Hotfix 2:** on Windows, `start_windows.bat` now works straight from the unzipped OpenRaven folder (v1.1.0 and v1.1.1 looked for the game one folder too high).
 >
 > 🔧 **v1.1.1 Hotfix:** one player on mouse and keyboard, another on a controller, on the same PC: F1 → Input → **Gamepads start at** → `2`. See [Controls](#controls).
 >
