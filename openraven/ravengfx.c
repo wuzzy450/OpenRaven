@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <math.h>
 
 #define CFG_GET_INT   0x924650UL
@@ -189,6 +190,48 @@ static void capture(const char *path);
 void ravengfx_capture(const char *path) { capture(path); }
 float ravengfx_fg_fps;
 void ravenfg_request_shot(const char *base); void ravenfg_present(void (*real)(void *), void *ctx);
+// Uncompressed PNG (stored deflate blocks), rows bottom-up as glReadPixels gives them.
+static uint32_t png_crc(uint32_t c, const unsigned char *p, size_t n) {
+    static uint32_t t[256]; if (!t[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t k = i; for (int j = 0; j < 8; j++) k = k & 1 ? 0xedb88320u ^ (k >> 1) : k >> 1; t[i] = k; }
+    c = ~c; while (n--) c = t[(c ^ *p++) & 0xff] ^ (c >> 8); return ~c;
+}
+static void png_be(unsigned char *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
+static void png_chunk(FILE *f, const char *type, const unsigned char *d, uint32_t n) {
+    unsigned char h[8]; png_be(h, n); memcpy(h + 4, type, 4); fwrite(h, 1, 8, f); if (n) fwrite(d, 1, n, f);
+    unsigned char c[4]; png_be(c, png_crc(png_crc(0, h + 4, 4), d, n)); fwrite(c, 1, 4, f);
+}
+static void write_png(const char *path, const unsigned char *rgb, int w, int h) {
+    size_t row = (size_t)w * 3 + 1, raw = row * h, nblk = (raw + 65534) / 65535;
+    unsigned char *z = malloc(raw + nblk * 5 + 6), *q = z; if (!z) return;
+    *q++ = 0x78; *q++ = 0x01;
+    uint32_t a = 1, b = 0; size_t left = raw, pos = 0;
+    while (left) {
+        size_t n = left > 65535 ? 65535 : left; left -= n;
+        *q++ = left ? 0 : 1; *q++ = n; *q++ = n >> 8; *q++ = ~n; *q++ = ~n >> 8;
+        for (size_t i = 0; i < n; i++, pos++) {
+            size_t r = pos / row, c = pos % row;
+            unsigned char v = c ? rgb[(size_t)(h - 1 - r) * w * 3 + c - 1] : 0;
+            *q++ = v; a = (a + v) % 65521; b = (b + a) % 65521;
+        }
+    }
+    png_be(q, b << 16 | a); q += 4;
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fwrite("\x89PNG\r\n\x1a\n", 1, 8, f);
+        unsigned char ih[13]; png_be(ih, w); png_be(ih + 4, h); ih[8] = 8; ih[9] = 2; ih[10] = ih[11] = ih[12] = 0;
+        png_chunk(f, "IHDR", ih, 13); png_chunk(f, "IDAT", z, (uint32_t)(q - z)); png_chunk(f, "IEND", NULL, 0); fclose(f);
+    }
+    free(z);
+}
+// F12 (ravenui.c key thread): save the screen as <RAVEN_SHOTDIR>/halo_YYYYMMDD_HHMMSS.png
+volatile int ravengfx_f12;
+static void f12_shot(void) {
+    const char *d = getenv("RAVEN_SHOTDIR"); if (!d) { fprintf(stderr, "[ravengfx] F12: RAVEN_SHOTDIR not set\n"); return; }
+    mkdir(d, 0755);
+    time_t tt = time(NULL); struct tm tm; localtime_r(&tt, &tm);
+    char path[600]; snprintf(path, sizeof path, "%s/halo_%04d%02d%02d_%02d%02d%02d.png", d, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    capture(path);
+}
 static void capture(const char *path){
     int vp[4]; p_glGetIntegerv(0x0BA2, vp);   // GL_VIEWPORT is unreliable; use drawable size below
     int fbo=0; p_glGetIntegerv(0x8CA6, &fbo);  // GL_DRAW_FRAMEBUFFER_BINDING
@@ -203,8 +246,10 @@ static void capture(const char *path){
     p_glReadPixels(0,0,w,h,0x1907,0x1401,buf);             // GL_RGB, GL_UNSIGNED_BYTE
     (void)fbo; if (p_glBindFramebuffer) p_glBindFramebuffer(0x8CA8, rfbo);
     p_glReadBuffer(rbuf);
-    FILE *f = fopen(path,"wb");
-    if (f) { fprintf(f,"P6\n%d %d\n255\n",w,h); for (int y=h-1;y>=0;y--) fwrite(buf+(size_t)y*w*3,1,(size_t)w*3,f); fclose(f); }
+    size_t pl = strlen(path);
+    if (pl > 4 && !strcmp(path + pl - 4, ".png")) write_png(path, buf, w, h);
+    else { FILE *f = fopen(path,"wb");
+    if (f) { fprintf(f,"P6\n%d %d\n255\n",w,h); for (int y=h-1;y>=0;y--) fwrite(buf+(size_t)y*w*3,1,(size_t)w*3,f); fclose(f); } }
     free(buf);
     fprintf(stderr,"[ravengfx] captured %s (%dx%d)\n", path, w, h);
 }
@@ -327,10 +372,13 @@ static void cond_seen(char k, int ctx, const char *n)
     if (lk != k || strncmp(last, n, 63)) { snprintf(last, sizeof last, "%s", n); lk = k; fprintf(stderr, "[cond] %c %d %.60s\n", k, ctx, n); }
 }
 static volatile int g_missionsel;
+static volatile int g_rackup;       // end-of-mission score screen (rackupN): one 32:9 layout, 4 stations
 static long cond_a(int ctx, const char *n)
 {
     cond_seen('A', ctx, n);
     if (n) {
+        if (!strncmp(n, "SCENE_START_rackup", 18)) g_rackup = 1;
+        else if (!strcmp(n, "RACKUP_COMPLETE") || !strncmp(n, "SCENE_START_game_select", 23) || !strcmp(n, "MIN_LOAD_DONE")) g_rackup = 0;
         if (!strcmp(n, "GAMESEL_CHAPTER")) g_missionsel = 1;
         else if (!strcmp(n, "GAMESEL_DONE") || !strcmp(n, "BACK") || !strcmp(n, "SCENE_START_game_select2") || !strcmp(n, "MIN_LOAD_DONE")) g_missionsel = 0;
     }
@@ -350,7 +398,8 @@ static void hybrid_frame(void)
 {
     static int run, want_last;
     if (!proj_hybrid) { raven_shadow_seen = 0; return; }
-    int want = raven_movie_open ? 3 : raven_shadow_seen ? 2 : g_missionsel ? 4 : 1;
+    // The score screen draws a shadow map (the saluting soldier), so check it before the mission test.
+    int want = raven_movie_open ? 3 : g_rackup ? 4 : raven_shadow_seen ? 2 : g_missionsel ? 4 : 1;
     if (want == 2) g_missionsel = 0;
     raven_shadow_seen = 0;
     if (want == raven_view) { run = 0; return; }
@@ -441,6 +490,7 @@ static void my_swap(void *dpy, unsigned long drawable)
     if (frames % 30 == 0) proj_update();
     { void streamenc_frame(int sw, int sh); streamenc_frame(ravengfx_win_w, ravengfx_win_h); }   // browser stream: game picture only
     if (ravengfx_overlay_draw) ravengfx_overlay_draw(ravengfx_win_w, ravengfx_win_h);
+    if (ravengfx_f12 && p_glReadPixels) { ravengfx_f12 = 0; f12_shot(); }   // F12 screenshot, F1 menu included
     if (shot_i < nshot && t - t0 >= shot_t[shot_i] && p_glReadPixels) {
         char path[512]; snprintf(path, sizeof path, "%s/shot_%g.ppm", shot_dir, shot_t[shot_i]);
         capture(path); path[strlen(path) - 4] = 0; ravenfg_request_shot(path); shot_i++;

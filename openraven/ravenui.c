@@ -568,6 +568,8 @@ static void *key_thread(void *a)
     const char *names[NK] = {tk, "Up", "Down", "Left", "Right", "Return", "Escape", "Tab", "Prior", "Next"};
     int kc[NK], shift_l = pXKeysymToKeycode(d, pXStringToKeysym("Shift_L")), shift_r = pXKeysymToKeycode(d, pXStringToKeysym("Shift_R"));
     for (int i = 0; i < NK; i++) kc[i] = pXKeysymToKeycode(d, pXStringToKeysym(names[i]));
+    int kc12 = pXKeysymToKeycode(d, pXStringToKeysym("F12"));   // F12: screenshot (ravengfx.c)
+    extern volatile int ravengfx_f12;
 
     int xi_op = -1, ev_, er_;
     void *xi = dlopen("libXi.so.6", RTLD_NOW);
@@ -610,6 +612,7 @@ static void *key_thread(void *a)
                 if (ks == 0xff08) text_key(8);                       // BackSpace
                 else if (ks > ' ' && ks < 127) text_key((int)ks);
             }
+        if (kc12 && (km[kc12 >> 3] >> (kc12 & 7) & 1) && !(prev[kc12 >> 3] >> (kc12 & 7) & 1)) { ravengfx_f12 = 1; fprintf(stderr, "[ravenui] F12 pressed\n"); }
         memcpy(prev, km, 32);
 
         if (!ui_open) {

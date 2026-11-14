@@ -148,6 +148,7 @@ fi
   ${RIO2PAD_STATE_FILE:+--setenv RIO2PAD_STATE_FILE "$RIO2PAD_STATE_FILE"} \
   ${RIO2PAD_JSDIR:+--setenv RIO2PAD_JSDIR "$RIO2PAD_JSDIR"} \
   --setenv RIO2PAD_PROCLOG 1 \
+  --setenv RAVEN_SHOTDIR "$WS/screenshots" \
   --setenv RIO2PAD_SKIPBOOT "${RIO2PAD_SKIPBOOT:-1}" \
   ${HALO_GAME:+--ro-bind "$HALO_GAME" /pm/g7/halo/game} \
   --setenv LIBGL_ALWAYS_SOFTWARE "${HALO_SW:-0}" \

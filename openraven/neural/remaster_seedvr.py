@@ -34,7 +34,7 @@ def graph(img, w, h, prefix):
 
 if __name__ == '__main__':
     from PIL import Image
-    root = os.environ.get('RM_INPUT', '/run/media/sean/RAID0-HDD-SERVER/MiniMaxH3/ComfyUI/input')
+    root = os.environ.get('RM_INPUT', 'input')
     for img in sys.argv[1:]:
         w, h = Image.open(os.path.join(root, img)).size
         w, h = w // 16 * 16, h // 16 * 16
