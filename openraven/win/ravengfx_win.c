@@ -302,9 +302,12 @@ static void cond_seen(char k, int ctx, const char *n) {
     }
 }
 static volatile int g_missionsel;   // mission select screen up (wide menu view)
+static volatile int g_rackup;       // end-of-mission score screen (rackupN): one 32:9 layout, 4 stations
 static SV long cond_a(int ctx, const char *n) {
     cond_seen('A', ctx, n);
     if (n) {
+        if (!strncmp(n, "SCENE_START_rackup", 18)) g_rackup = 1;
+        else if (!strcmp(n, "RACKUP_COMPLETE") || !strncmp(n, "SCENE_START_game_select", 23) || !strcmp(n, "MIN_LOAD_DONE")) g_rackup = 0;
         if (!strcmp(n, "GAMESEL_CHAPTER")) g_missionsel = 1;
         else if (!strcmp(n, "GAMESEL_DONE") || !strcmp(n, "BACK") || !strcmp(n, "SCENE_START_game_select2") || !strcmp(n, "MIN_LOAD_DONE")) g_missionsel = 0;
     }
@@ -329,7 +332,8 @@ static void hybrid_frame(void) {
     proc_log();
     cond_frame++;
     if (!proj_hybrid) { raven_shadow_seen = 0; return; }
-    int want = raven_movie_open ? 3 : raven_shadow_seen ? 2 : g_missionsel ? 4 : 1;
+    // The score screen draws a shadow map (the saluting soldier), so check it before the mission test.
+    int want = raven_movie_open ? 3 : g_rackup ? 4 : raven_shadow_seen ? 2 : g_missionsel ? 4 : 1;
     if (want == 2) g_missionsel = 0;
     raven_shadow_seen = 0;
     if (want == raven_view) { run = 0; return; }
