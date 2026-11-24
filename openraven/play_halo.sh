@@ -31,6 +31,8 @@ if [ "$RES" = native ]; then
   [ -z "$RES" ] && RES=$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}')
   [ "$RES" = 640x480 ] && RES=1920x1080
   RES="${RES:-1920x1080}"
+  # Portrait panels (the Steam Deck reports 800x1280): the game is landscape, so swap.
+  w="${RES%x*}"; h="${RES#*x}"; [ "$h" -gt "$w" ] 2>/dev/null && RES="${h}x${w}"
 fi
 CMD=(env LD_PRELOAD="$PRELOAD" ./game)
 # HALO_GDB=1: run under gdb and print a backtrace on crash (debugging).
@@ -81,7 +83,12 @@ if alsa_plugin pulse && [ -n "$PULSE_SERVER" ]; then
     ASOUND_CONF="$OUT/halo_asound_limiter.conf"
   fi
 fi
-echo "[OpenRaven] audio: $(basename "$ASOUND_CONF")"
+# SteamOS: FMOD's own device pick plays the first sound only; the system's "pulse" ALSA device works
+# (found by Derp0). FMOD_ALSA_DEVICE set by the player always wins.
+if [ -z "${FMOD_ALSA_DEVICE+x}" ] && [ -f /etc/os-release ] && grep -qi '^ID=steamos' /etc/os-release && alsa_plugin pulse; then
+  export FMOD_ALSA_DEVICE=pulse
+fi
+echo "[OpenRaven] audio: $(basename "$ASOUND_CONF")${FMOD_ALSA_DEVICE:+ (FMOD_ALSA_DEVICE=$FMOD_ALSA_DEVICE)}"
 # Browser stream: friends hear the game's own sound. The surround mixes get a "tee" (ALSA file plugin)
 # that copies the game's sound, as 48 kHz 16-bit stereo, into a pipe that rio2pad.so (streamweb.c) reads.
 if [ "${RAVEN_STREAM:-0}" = 1 ]; then
@@ -158,6 +165,7 @@ fi
   ${HALO_FULLSCREEN:+--setenv HALO_FULLSCREEN "$HALO_FULLSCREEN"} \
   "${DISPLAY_ENV[@]}" \
   ${PULSE_SERVER:+--setenv PULSE_SERVER "$PULSE_SERVER"} \
+  ${FMOD_ALSA_DEVICE:+--setenv FMOD_ALSA_DEVICE "$FMOD_ALSA_DEVICE"} \
   --setenv XAUTHORITY "${XAUTHORITY:-}" \
   --setenv XDG_RUNTIME_DIR "/run/user/$(id -u)" \
   --setenv LD_BIND_NOW 1 \

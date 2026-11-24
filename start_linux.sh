@@ -29,50 +29,74 @@ echo "================================================================"
 echo "  OpenRaven — Halo: Fireteam Raven (v3.11) PC Loader"
 echo "================================================================"
 
-# 1. Check and install required system packages if missing
+# 1. Runtime tools. Only what is missing is installed, and nothing at all when everything is present
+#    (the release ships prebuilt shims, so no compiler is needed). On a read-only system (SteamOS) or
+#    without network, nothing is installed: the script says what is missing and carries on if it can.
 SUDO="sudo"
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
 elif ! command -v sudo >/dev/null 2>&1; then
-  if command -v doas >/dev/null 2>&1; then
-    SUDO="doas"
-  else
-    SUDO=""
-  fi
+  if command -v doas >/dev/null 2>&1; then SUDO="doas"; else SUDO=""; fi
 fi
 
+have_lapack() {
+  ldconfig -p 2>/dev/null | grep -q "liblapack\.so\.3" || [ -f /usr/lib/x86_64-linux-gnu/liblapack.so.3 ] || \
+    [ -f /usr/lib64/liblapack.so.3 ] || [ -f /usr/lib/liblapack.so.3 ] || [ -f "$ROOT/openraven/extralibs/liblapack.so.3" ]
+}
+# The shims only need building when they are missing (a git checkout) or OPENRAVEN_REBUILD=1.
+NEED_BUILD=0
+if [ ! -f "$ROOT/openraven/rio2pad.so" ] || [ ! -f "$ROOT/openraven/ravengfx.so" ] || [ "${OPENRAVEN_REBUILD:-0}" = 1 ]; then
+  NEED_BUILD=1
+fi
+
+# need_pkgs: generic names; each package manager branch maps them to its own.
 need_pkgs=()
 command -v bwrap >/dev/null 2>&1 || need_pkgs+=(bubblewrap)
 command -v unzip >/dev/null 2>&1 || need_pkgs+=(unzip)
 { command -v 7z || command -v 7zz || command -v 7za || command -v bsdtar; } >/dev/null 2>&1 || need_pkgs+=(7zip)
-command -v gcc   >/dev/null 2>&1 || need_pkgs+=(gcc)
-command -v g++   >/dev/null 2>&1 || need_pkgs+=(g++)
-[ -f /usr/include/X11/Xlib.h ] || need_pkgs+=(libx11-dev)
-[ -f /usr/include/vulkan/vulkan.h ] || need_pkgs+=(libvulkan-dev)
-
-# Check for LAPACK runtime (required by game binary)
-if ! ldconfig -p 2>/dev/null | grep -q "liblapack\.so\.3" && \
-   [ ! -f /usr/lib/x86_64-linux-gnu/liblapack.so.3 ] && \
-   [ ! -f /usr/lib64/liblapack.so.3 ] && \
-   [ ! -f /usr/lib/liblapack.so.3 ]; then
-  need_pkgs+=(liblapack3)
+have_lapack || need_pkgs+=(lapack)
+if [ "$NEED_BUILD" = 1 ]; then
+  { command -v gcc && command -v g++; } >/dev/null 2>&1 || need_pkgs+=(compiler)
+  [ -f /usr/include/X11/Xlib.h ] || need_pkgs+=(x11-headers)
+  [ -f /usr/include/vulkan/vulkan.h ] || need_pkgs+=(vulkan-headers)
 fi
 
+map_pkgs() {   # manager -> its package names for need_pkgs
+  local n
+  for n in "${need_pkgs[@]}"; do
+    case "$1:$n" in
+      apt:bubblewrap|dnf:bubblewrap|pacman:bubblewrap|zypper:bubblewrap) echo bubblewrap ;;
+      *:unzip) echo unzip ;;
+      apt:7zip) echo p7zip-full ;; dnf:7zip) echo p7zip p7zip-plugins ;; pacman:7zip) echo 7zip ;; zypper:7zip) echo p7zip ;;
+      apt:lapack|zypper:lapack) echo liblapack3 ;; dnf:lapack|pacman:lapack) echo lapack ;;
+      apt:compiler) echo build-essential ;; dnf:compiler|zypper:compiler) echo gcc gcc-c++ make ;; pacman:compiler) echo base-devel ;;
+      apt:x11-headers) echo libx11-dev ;; dnf:x11-headers|zypper:x11-headers) echo libX11-devel ;; pacman:x11-headers) echo libx11 ;;
+      apt:vulkan-headers) echo libvulkan-dev ;; *:vulkan-headers) echo vulkan-headers ;;
+    esac
+  done
+}
+
 if [ "${#need_pkgs[@]}" -gt 0 ]; then
-  echo "[OpenRaven] Installing missing dependencies (${need_pkgs[*]})..."
-  if command -v apt-get >/dev/null 2>&1; then
-    APT_PKGS=(bubblewrap unzip p7zip-full build-essential libgl1 libgl1-mesa-dri mesa-vulkan-drivers libvulkan1 libx11-6 libx11-dev libxi6 libxrandr2 liblapack3 libudev1 pulseaudio-utils alsa-utils libasound2-plugins swh-plugins ladspa-sdk libvulkan-dev wmctrl)
-    $SUDO apt-get update && $SUDO apt-get install -y "${APT_PKGS[@]}"
-  elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y bubblewrap unzip p7zip p7zip-plugins gcc gcc-c++ make libGL mesa-dri-drivers mesa-vulkan-drivers vulkan-loader libX11 libX11-devel libXi libXrandr lapack systemd-libs pulseaudio-utils alsa-utils ladspa-swh-plugins vulkan-headers wmctrl
-  elif command -v pacman >/dev/null 2>&1; then
-    $SUDO pacman -Sy --needed --noconfirm bubblewrap unzip 7zip base-devel libglvnd mesa vulkan-radeon vulkan-intel vulkan-icd-loader libx11 libxi libxrandr lapack systemd-libs libpulse alsa-utils alsa-plugins swh-plugins vulkan-headers
-  elif command -v zypper >/dev/null 2>&1; then
-    $SUDO zypper install -y bubblewrap unzip p7zip gcc gcc-c++ make libGL1 Mesa-dri Mesa-vulkan-device-select libvulkan1 libX11-6 libX11-devel libXi6 libXrandr2 liblapack3 systemd-libs pulseaudio-utils alsa-utils ladspa-swh-plugins vulkan-headers wmctrl
+  echo "[OpenRaven] Missing: ${need_pkgs[*]}"
+  readonly_root=0   # SteamOS: the system is read-only and pacman can't even take its lock
+  { [ -f /etc/os-release ] && grep -qi '^ID=steamos' /etc/os-release; } && readonly_root=1
+  if [ "$readonly_root" = 1 ] || [ "${OPENRAVEN_NO_INSTALL:-0}" = 1 ]; then
+    echo "[OpenRaven] Not installing anything (read-only system such as SteamOS, or OPENRAVEN_NO_INSTALL=1)."
   else
-    echo "Please install the following packages using your distro's package manager: ${need_pkgs[*]}"
-    exit 1
+    mgr=""; for m in apt-get:apt dnf:dnf pacman:pacman zypper:zypper; do command -v "${m%%:*}" >/dev/null 2>&1 && { mgr="${m#*:}"; break; }; done
+    mapfile -t pk < <(map_pkgs "$mgr" | tr ' ' '\n' | sort -u)
+    echo "[OpenRaven] Installing: ${pk[*]}"
+    case "$mgr" in
+      apt)    $SUDO apt-get update && $SUDO apt-get install -y "${pk[@]}" || true ;;
+      dnf)    $SUDO dnf install -y "${pk[@]}" || true ;;
+      pacman) $SUDO pacman -S --needed --noconfirm "${pk[@]}" || true ;;
+      zypper) $SUDO zypper install -y "${pk[@]}" || true ;;
+      *)      echo "[OpenRaven] Install these with your package manager: ${need_pkgs[*]}" ;;
+    esac
   fi
+  # Only the runtime tools are hard requirements.
+  command -v bwrap >/dev/null 2>&1 || { echo "[OpenRaven] bubblewrap (bwrap) is required. Install it and run again." >&2; exit 1; }
+  have_lapack || echo "[OpenRaven] Warning: liblapack.so.3 not found; you can also drop it into openraven/extralibs/." >&2
 fi
 
 # 2. Game files. Needs (from any of the player's archives, any layout, also archives inside archives;
@@ -207,6 +231,30 @@ pick_archive() {   # prints chosen paths, one per line
   fi
 }
 
+# Updating: a new OpenRaven folder takes the game files from an older one next to it (or from
+# OPENRAVEN_OLD=/path/to/old/folder), so the game archive isn't needed again. Same drive: moved
+# (no extra space); other drive: copied.
+adopt_old_install() {
+  local o
+  for o in ${OPENRAVEN_OLD:+"$OPENRAVEN_OLD"} "$ROOT"/../*/; do
+    o="$(cd "$o" 2>/dev/null && pwd)" || continue
+    [ "$o" = "$ROOT" ] && continue
+    [ -f "$o/start_linux.sh" ] || [ -n "$OPENRAVEN_OLD" ] || continue
+    local odec="$o/openraven/3.11-dec/pm/g7/halo"
+    if ! have_data && [ -d "$o/pm/g7/halo/data" ]; then
+      echo "[OpenRaven] Taking the game data from the earlier install: $o"
+      if [ "$(stat -c %d "$o")" = "$(stat -c %d "$ROOT")" ] && [ ! -e "$ROOT/pm" ]; then mv "$o/pm" "$ROOT/pm"
+      else mkdir -p "$ROOT/pm"; cp -a "$o/pm/." "$ROOT/pm/"; fi
+    fi
+    if ! have_dec && [ "$(sha "$odec/game")" = "$DEC_GAME" ] && [ "$(sha "$odec/halo.so")" = "$DEC_HALOSO" ]; then
+      mkdir -p "$DEC"; cp -f "$odec/game" "$odec/halo.so" "$DEC/"
+    fi
+    ready && { echo "[OpenRaven] Game files taken from $o (that folder can be deleted now)."; return 0; }
+  done
+  return 0
+}
+ready || adopt_old_install
+
 if ! ready; then
   for a in "$@" "$ROOT"/* "$ROOT"/../* "$HOME/Downloads"/* "$HOME/Desktop"/*; do
     [ -f "$a" ] || continue
@@ -264,12 +312,15 @@ mkdir -p "$ROOT/pm/g7/dump" "$ROOT/pm/g7/halo/pmuser/messages"
 chmod +x "$ROOT/pm/g7/halo/game" 2>/dev/null || true
 chmod 755 "$ROOT/pm/g7/halo/game" "$ROOT/pm/g7/halo/halo.so" "$DEC/game" "$DEC/halo.so" "$ROOT/openraven/"*.sh 2>/dev/null || true
 
-# 4. Build OpenRaven shims if needed (or if source is newer)
-if [ ! -f "$ROOT/openraven/rio2pad.so" ] || [ ! -f "$ROOT/openraven/ravengfx.so" ] || \
-   [ "$ROOT/openraven/ravengfx.c" -nt "$ROOT/openraven/ravengfx.so" ] || \
-   [ "$ROOT/openraven/rio2pad.c" -nt "$ROOT/openraven/rio2pad.so" ]; then
-  echo "[OpenRaven] Building shims (rio2pad.so, ravengfx.so)..."
-  "$ROOT/openraven/build.sh"
+# 4. Build OpenRaven shims only if they are missing (or OPENRAVEN_REBUILD=1). Releases ship them prebuilt.
+if [ "$NEED_BUILD" = 1 ]; then
+  if command -v gcc >/dev/null 2>&1 && command -v g++ >/dev/null 2>&1; then
+    echo "[OpenRaven] Building shims (rio2pad.so, ravengfx.so)..."
+    "$ROOT/openraven/build.sh"
+  elif [ ! -f "$ROOT/openraven/rio2pad.so" ] || [ ! -f "$ROOT/openraven/ravengfx.so" ]; then
+    echo "[OpenRaven] The shims are missing and no compiler (gcc/g++) is installed. Use a release zip (it has them prebuilt)." >&2
+    exit 1
+  fi
 fi
 if grep -qi microsoft /proc/version 2>/dev/null; then
   echo "[OpenRaven] Note: on Windows, use start_windows.bat (native, much faster than WSL)."

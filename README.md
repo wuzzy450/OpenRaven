@@ -64,7 +64,13 @@ cd OpenRaven
 ./start_linux.sh
 ```
 
-The first run installs what it needs (asking for your password), finds your game archive or asks for it, unpacks it and starts the game. You can also give it the archive directly: `./start_linux.sh /path/to/game.zip`.
+The first run installs only the tools that are missing (asking for your password; nothing, and no password, if you already have them, which is the case on the Steam Deck), finds your game archive or asks for it, unpacks it and starts the game. You can also give it the archive directly: `./start_linux.sh /path/to/game.zip`.
+
+**Works offline and stays in its folder:** the release has everything prebuilt (no compiler, no downloads). After the first run the game archive isn't needed any more: everything lives in the OpenRaven folder.
+
+**Updating:** unzip the new release next to the old one (for example both in the same parent folder) and run its `./start_linux.sh`. It takes the game files from the old folder (moved on the same drive, so no extra space), and the old folder can then be deleted. Old folder somewhere else: `OPENRAVEN_OLD=/path/to/old/OpenRaven ./start_linux.sh`.
+
+**Steam Deck:** works from Desktop Mode or as a non-Steam game (Target: `start_linux.sh`, Start In: the OpenRaven folder, Launch Options: `%command%`). The resolution is set to 1280x800 and the right sound device is picked automatically. Thanks to Derp0 for the Steam Deck fixes.
 
 To force-close the game (arcade games have no quit button): `./openraven/stop_halo.sh`
 
