@@ -6,6 +6,8 @@
 
 ▶ [Watch Mission 1 running on PC](https://youtu.be/pZ166zhaEjs) · 💬 [Discord](https://discord.gg/nuvpXycag8) for help and updates · ☕ [Support on Ko-fi](https://ko-fi.com/wuzzy450)
 
+> 🐧 **v1.1.3 – Steam Deck & portable Linux:** no sudo or internet needed when you already have the tools (never installs anything on SteamOS), Steam Deck sound and 1280x800 fixed, and updates no longer need your game archive. See [Linux](#linux). *Still needs testing: if anything breaks, [v1.1.2](https://github.com/wuzzy450/OpenRaven/releases/tag/v1.1.2) is still available.*
+>
 > 🔧 **v1.1.2 Hotfix 2:** on Windows, `start_windows.bat` now works straight from the unzipped OpenRaven folder (v1.1.0 and v1.1.1 looked for the game one folder too high).
 >
 > 🔧 **v1.1.1 Hotfix:** one player on mouse and keyboard, another on a controller, on the same PC: F1 → Input → **Gamepads start at** → `2`. See [Controls](#controls).
@@ -68,9 +70,13 @@ The first run installs only the tools that are missing (asking for your password
 
 **Works offline and stays in its folder:** the release has everything prebuilt (no compiler, no downloads). After the first run the game archive isn't needed any more: everything lives in the OpenRaven folder.
 
-**Updating:** unzip the new release next to the old one (for example both in the same parent folder) and run its `./start_linux.sh`. It takes the game files from the old folder (moved on the same drive, so no extra space), and the old folder can then be deleted. Old folder somewhere else: `OPENRAVEN_OLD=/path/to/old/OpenRaven ./start_linux.sh`.
+**Updating:** your game archive is only needed for the very first install. To update, pick one:
+1. **Easiest:** unzip the new release over your current OpenRaven folder (overwrite), then run `./start_linux.sh` as usual. Your game files stay where they are.
+2. **Side by side:** unzip the new release next to your current folder (it makes a new `OpenRaven/` folder) and run its `./start_linux.sh`. It moves your game files over from the old folder, without needing any extra space. Then you can delete the old folder. (Old folder somewhere else: `OPENRAVEN_OLD=/path/to/old/folder ./start_linux.sh`.)
 
-**Steam Deck:** works from Desktop Mode or as a non-Steam game (Target: `start_linux.sh`, Start In: the OpenRaven folder, Launch Options: `%command%`). The resolution is set to 1280x800 and the right sound device is picked automatically. Thanks to Derp0 for the Steam Deck fixes.
+**Options:** `OPENRAVEN_NO_INSTALL=1` never installs packages (just reports what's missing). A missing `liblapack.so.3` can also be dropped into `openraven/extralibs/`.
+
+**Steam Deck:** works from Desktop Mode or as a non-Steam game (Target: `start_linux.sh`, Start In: the OpenRaven folder, Launch Options: `%command%`). Nothing is installed and no password is asked. With `resolution = native` the game runs at 1280x800, and the right sound device is picked automatically (`FMOD_ALSA_DEVICE=pulse`; set your own in the launch options to override). Thanks to Derp0 for the Steam Deck fixes.
 
 To force-close the game (arcade games have no quit button): `./openraven/stop_halo.sh`
 
@@ -258,7 +264,7 @@ The cabinet runs a 64-bit Linux game with a Raw Thrills I/O board, IR light guns
 
 Prebuilt files are included, so you only need this if you change the code.
 
-- **Linux:** `cd openraven && ./build.sh` (needs gcc/g++, X11 and Vulkan headers; `start_linux.sh` installs them).
+- **Linux:** `cd openraven && ./build.sh` (needs gcc/g++, X11 and Vulkan headers). `start_linux.sh` only builds when the shims are missing, or with `OPENRAVEN_REBUILD=1`.
 - **Windows:** install [MSYS2](https://www.msys2.org/) with the clang64 toolchain, put `C:/msys64/clang64/bin` on your PATH, then run `make` in `openraven/win`.
 
 ---
@@ -266,6 +272,7 @@ Prebuilt files are included, so you only need this if you change the code.
 ## Credits
 
 - **Wuzzy450**: creator ([Ko-fi](https://ko-fi.com/wuzzy450) · [Discord](https://discord.gg/nuvpXycag8))
+- **Derp0**: Steam Deck fixes and testing (offline, no-sudo launcher, sound, resolution)
 - **AMD FidelityFX FSR 2**, and **JuanDiegoMontoya**'s MIT-licensed OpenGL port of it (`openraven/fsr2/`)
 
 ## License
