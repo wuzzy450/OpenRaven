@@ -8,7 +8,12 @@ gfx() { # gfx key default -> value from graphics.ini (env HALO_GFX_<key> wins)
   [ -z "$v" ] && [ -f "$GFX_INI" ] && v=$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([^#]*\).*/\1/p" "$GFX_INI" | tail -1 | sed 's/[[:space:]]*$//')
   echo "${v:-$2}"
 }
-[ -f "$GFX_INI" ] || : > "$GFX_INI"   # the F1 overlay saves here
+# graphics.ini is the player's own: made once from graphics.default.ini (Steam Deck / SteamOS: with
+# presets/deck.ini on top); never shipped in the release, so updates don't overwrite it.
+GFX_NEW=0
+if [ ! -f "$GFX_INI" ]; then
+  if [ -f "$OUT/graphics.default.ini" ]; then cp "$OUT/graphics.default.ini" "$GFX_INI"; GFX_NEW=1; else : > "$GFX_INI"; fi
+fi
 [ -f "$GFX_INI" ] && GFX_BWRAP+=(--bind "$GFX_INI" /pm/g7/graphics.ini --setenv RAVENGFX_CONF /pm/g7/graphics.ini)
 [ -n "$RAVENGFX_KEYLOG" ] && GFX_BWRAP+=(--setenv RAVENGFX_KEYLOG "$RAVENGFX_KEYLOG")
 [ -n "$RAVENGFX_RENDER" ] && GFX_BWRAP+=(--setenv RAVENGFX_RENDER "$RAVENGFX_RENDER")
@@ -113,4 +118,14 @@ if [ "$(gfx HDR 0)" = 1 ] && [ -z "$HALO_NO_GAMESCOPE" ] && [ -z "$GAMESCOPE_WAY
   else
     echo "HDR = 1 but gamescope is not installed: the game shows in SDR (install gamescope for HDR10)." >&2
   fi
+fi
+
+# First launch on SteamOS: the Steam Deck preset.
+if [ "$GFX_NEW" = 1 ] && [ -f /etc/os-release ] && grep -qi '^ID=steamos' /etc/os-release && [ -f "$OUT/presets/deck.ini" ]; then
+  while IFS= read -r l; do
+    case "$l" in ''|'#'*) continue;; esac
+    gfx_set "$(echo "${l%%=*}" | xargs)" "$(echo "${l#*=}" | xargs)"
+  done < "$OUT/presets/deck.ini"
+  gfx_set preset deck
+  echo "[OpenRaven] Steam Deck: graphics.ini made with the Deck preset (F1 > Display > Preset to change)."
 fi

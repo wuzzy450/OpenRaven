@@ -6,7 +6,9 @@
 
 ▶ [Watch Mission 1 running on PC](https://youtu.be/pZ166zhaEjs) · 💬 [Discord](https://discord.gg/nuvpXycag8) for help and updates · ☕ [Support on Ko-fi](https://ko-fi.com/wuzzy450)
 
-> 🐧 **v1.1.3 – Steam Deck & portable Linux:** no sudo or internet needed when you already have the tools (never installs anything on SteamOS), Steam Deck sound and 1280x800 fixed, and updates no longer need your game archive. See [Linux](#linux). *Still needs testing: if anything breaks, [v1.1.2](https://github.com/wuzzy450/OpenRaven/releases/tag/v1.1.2) is still available.*
+> 🎛️ **v1.1.4:** quality presets (Steam Deck / Low / Medium / Max, the Deck one picked automatically on SteamOS), **Quit** and **Restart** buttons in the F1 menu, updates no longer reset your settings, and a quieter default volume on Windows (Volume boost 100%, was 300%; raise it in F1 → Audio & Input). See [Settings menu](#settings-menu-f1). *Still needs testing: if anything breaks, [v1.1.3](https://github.com/wuzzy450/OpenRaven/releases/tag/v1.1.3) is still available.*
+>
+> 🐧 **v1.1.3 – Steam Deck & portable Linux:** no sudo or internet needed when you already have the tools (never installs anything on SteamOS), Steam Deck sound and 1280x800 fixed, and updates no longer need your game archive. See [Linux](#linux).
 >
 > 🔧 **v1.1.2 Hotfix 2:** on Windows, `start_windows.bat` now works straight from the unzipped OpenRaven folder (v1.1.0 and v1.1.1 looked for the game one folder too high).
 >
@@ -78,7 +80,7 @@ The first run installs only the tools that are missing (asking for your password
 
 **Steam Deck:** works from Desktop Mode or as a non-Steam game (Target: `start_linux.sh`, Start In: the OpenRaven folder, Launch Options: `%command%`). Nothing is installed and no password is asked. With `resolution = native` the game runs at 1280x800, and the right sound device is picked automatically (`FMOD_ALSA_DEVICE=pulse`; set your own in the launch options to override). Thanks to Derp0 for the Steam Deck fixes.
 
-To force-close the game (arcade games have no quit button): `./openraven/stop_halo.sh`
+To quit: F1 → **Quit** (or **Restart** to apply settings). Force-close if it hangs: `./openraven/stop_halo.sh`
 
 ### "Still needed: the v3.11 game program (game + halo.so)"
 
@@ -141,7 +143,7 @@ Every player needs OpenRaven **v1.1.0** and the same v3.11 game set up and runni
 3. Set **Players** to the number of PCs in the game, your own included (2, 3 or 4).
 4. Leave **Port** at `27500` and **Auto port forwarding** at `1`.
 5. Optional: **Input delay**. `1`–`2` for players at home, `3`–`4` over the internet (the default 3 is fine for most).
-6. Press **Enter** (Save), then **quit and restart the game** (Alt+F4 on Windows, `./openraven/stop_halo.sh` on Linux).
+6. Press **Enter** (Save), then press **Restart** at the top of the F1 menu.
 7. The game now waits on a black screen for the others. Press F1 → Coop: the **Status** section shows the address to give your friends:
    - friends in the same house: the home address, e.g. `192.168.1.20`
    - friends over the internet: your public address (also shown at [whatismyip.com](https://www.whatismyip.com)), e.g. `203.0.113.5`
@@ -215,7 +217,9 @@ None of these affect the game itself. Fixes are planned for later updates; pleas
 
 ## Settings menu (F1)
 
-Press **F1** in game. Use the mouse, or the arrow keys, Tab, Enter (save) and Esc (close).
+Press **F1** in game. Use the mouse, or the arrow keys, Tab, Enter (save) and Esc (close). **Restart** (saves first) and **Quit** are at the top right.
+
+- **Preset** (first item on Display): *max* (the default), *medium*, *low*, or *deck* for the Steam Deck and other handhelds (upscaler off, 60 fps cap, lighter shadows). On SteamOS the first launch picks *deck* by itself. Changing any single setting turns it into *custom*. Presets live in `openraven/presets/` as plain text if you want to tweak them.
 
 - **Display:** resolution, VSync, FPS cap, aspect fix, field of view, FPS counter, HDR on/off, peak brightness, paper white and highlight strength *(applies after a restart; Windows: turn on "Use HDR" in display settings first; Linux: HDR on in the desktop + gamescope)*.
 - **Upscaling:** FSR 2 mode (native, quality, balanced, performance, ultra performance) and sharpness.
@@ -225,9 +229,9 @@ Press **F1** in game. Use the mouse, or the arrow keys, Tab, Enter (save) and Es
 - **Cabinet:** Free Play, skip boot checks, players (2 or 4) and the 4-player picture.
 - **Coop:** online coop (host / join, address, players, port, input delay, auto port forwarding), status and links, browser stream.
 
-Settings are saved in [`openraven/graphics.ini`](openraven/graphics.ini). Delete that file to go back to the game's own arcade settings.
+Settings are saved in `openraven/graphics.ini`, made from [`openraven/graphics.default.ini`](openraven/graphics.default.ini) on first launch. Updates never overwrite it. Delete it to start over from the defaults, or empty it for the game's own arcade settings.
 
-**Slow GPU?** Set FSR 2 mode to *quality* or *performance*, and lower the shadow resolution to 4096.
+**Slow GPU?** Try the *medium* or *low* preset.
 
 ---
 

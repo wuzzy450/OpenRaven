@@ -16,7 +16,7 @@ typedef int R;  // FMOD_RESULT
 
 static HMODULE g_core, g_studio;
 static int g_loaded;  // 0 = not tried, 1 = ok, -1 = failed
-static float g_boost = 4.0f;
+static float g_boost = 100.0f / 75.0f;   // = volume 100%
 static void *g_master;  // low-level master channel group
 
 static int fmod_load(void) {
@@ -101,10 +101,10 @@ static sv_evcb g_evcb;
 static R ms_chcb(H c, int t, int ct, void *d1, void *d2) { cb_thread(); return g_chcb ? g_chcb(c, t, ct, d1, d2) : 0; }
 static R ms_evcb(unsigned t, H e, void *p) { cb_thread(); return g_evcb ? g_evcb(t, e, p) : 0; }
 
-// graphics.ini / overlay `volume` (100%..400%, Linux PipeWire scale): 300% = our default 4.0.
+// graphics.ini / overlay `volume` (100%..400%, Linux PipeWire scale). Default 100% (300% was too loud).
 float raven_fmod_volume_from_pct(const char *pct) {
     float p = (float)atof(pct);
-    return p > 0 ? p / 75.0f : 4.0f;
+    return (p > 0 ? p : 100.0f) / 75.0f;
 }
 void raven_fmod_set_volume(float boost) {
     extern void raven_alsa_set_gain(float g);

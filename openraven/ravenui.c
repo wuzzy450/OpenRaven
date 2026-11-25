@@ -40,6 +40,7 @@ typedef struct {
 } item_t;
 
 static item_t items[] = {
+ {"Display","Preset","preset",T_CHOICE,0,"custom|deck|low|medium|max",0,0,0,"custom","Sets the quality items below in one go. deck = Steam Deck / handhelds. Changing any item makes it custom"},
  {"Display","Resolution","resolution",T_CHOICE,0,"native|1280x720|1920x1080|2560x1440|3840x2160|1440x1080|1600x1200|1920x1200|2560x1600|2560x1080|3440x1440|3840x1080|5120x1440",0,0,0,"1920x1080","Screen size. native = desktop size"},
  {"Display","Render scale","RENDER_SCALE",T_CHOICE,0,"0.5|0.75|1.0|1.25|1.5|2.0",0,0,0,"1.0","Relative to screen, any aspect. Above 1 = supersampling. Ignored when FSR 2 is on"},
  {"Display","VSync","VSYNC",T_CHOICE,1,"0|1|adaptive",0,0,0,"0","Sync to the monitor: no tearing. adaptive = only tears when a frame is late"},
@@ -179,6 +180,16 @@ static void load_values(void)
     }
 }
 
+// Quit / Restart (F1 header). play_halo.sh starts the game again when the restart flag file exists.
+static void ui_quit(void) { fflush(NULL); _exit(0); }
+static void ui_restart_game(void)
+{
+    const char *f = getenv("RAVEN_RESTART_FLAG");
+    FILE *fp = fopen(f && *f ? f : "/pm/g7/dump/restart", "w"); if (fp) fclose(fp);
+    ui_quit();
+}
+static const char *preset_dir(void) { const char *d = getenv("RAVEN_PRESET_DIR"); return d && *d ? d : NULL; }
+static void apply_preset(const char *name);
 static void change(item_t *it, int dir)
 {
     if (it->type == T_TEXT || it->type == T_INFO) return;   // typed (text_key), or read-only
@@ -196,8 +207,32 @@ static void change(item_t *it, int dir)
         snprintf(it->val, sizeof it->val, "%s", opt[cur]);
     }
     ui_dirty = 1;
+    if (!strcmp(it->key, "preset")) { apply_preset(it->val); return; }
+    for (int i = 0; i < NITEMS; i++) if (!strcmp(items[i].key, "preset")) snprintf(items[i].val, sizeof items[i].val, "custom");
     if (it->live) apply_live(it); else ui_restart = 1;
 }
+// Presets: openraven/presets/<name>.ini (key = value lines) set those items. Changing any other item
+// turns the preset back to "custom".
+static void apply_preset(const char *name)
+{
+    const char *dir = preset_dir();
+    if (!dir || !strcmp(name, "custom")) return;
+    char path[1024], line[256]; snprintf(path, sizeof path, "%s/%s.ini", dir, name);
+    FILE *f = fopen(path, "r");
+    if (!f) { snprintf(ui_msg, sizeof ui_msg, "Preset file missing: %s.ini", name); return; }
+    while (fgets(line, sizeof line, f)) {
+        char k[64], v[64];
+        if (line[0] == '#' || sscanf(line, " %63[^= \t] = %63[^#\r\n]", k, v) != 2) continue;
+        for (char *e = v + strlen(v); e > v && (e[-1] == ' ' || e[-1] == '\t'); ) *--e = 0;
+        for (int i = 0; i < NITEMS; i++) if (!strcmp(items[i].key, k)) {
+            snprintf(items[i].val, sizeof items[i].val, "%s", v);
+            if (items[i].live) apply_live(&items[i]); else ui_restart = 1;
+        }
+    }
+    fclose(f);
+    snprintf(ui_msg, sizeof ui_msg, "Preset %s: Save, then Restart.", name);
+}
+
 
 // ---- live effects ----
 static void set_volume(const char *pct)
@@ -301,7 +336,7 @@ static int text_w(const char *s) { return (int)strlen(s) * FONT_W; }
 static void text_c(float x, float y, float w, float h, const char *s, uint32_t c) { text(x + (w - text_w(s)) / 2, y + (h - FONT_H) / 2, s, c); }
 
 // Clickable areas, rebuilt with every panel (pixels, relative to the panel).
-enum { H_ROW, H_DEC, H_INC, H_TAB, H_SAVE, H_CLOSE, H_TRACK };
+enum { H_ROW, H_DEC, H_INC, H_TAB, H_SAVE, H_CLOSE, H_TRACK, H_QUIT, H_RESTART };
 typedef struct { int x, y, w, h, act, arg; } hit_t;
 static hit_t hits[256]; static int nhits;
 static int g_mx = -1, g_my = -1;                    // mouse, pixels relative to the panel
@@ -388,6 +423,8 @@ static void build_panel(void)
     box(0, 0, PW, 3, ACCENT);
     text(28, 20, "OpenRaven settings", RGB(140, 230, 160));
     button(PW - 24 - 40, 14, 40, 36, "X", H_CLOSE, 0);
+    button(PW - 24 - 40 - 10 - 90, 14, 90, 36, "Quit", H_QUIT, 0);
+    button(PW - 24 - 40 - 10 - 90 - 10 - 120, 14, 120, 36, "Restart", H_RESTART, 0);
 
     float tx = 24;                                          // tab bar
     for (int t = 0; t < NTABS; t++) {
@@ -508,6 +545,8 @@ static void mouse_button(int b)   // under ui_lock. 1 left, 3 right, 4/5 wheel
         case H_TAB: if (b == 1) set_tab(h->arg); break;
         case H_SAVE: if (b == 1) save(); break;
         case H_CLOSE: if (b == 1) ui_open = 0; break;
+        case H_QUIT: if (b == 1) ui_quit(); break;
+        case H_RESTART: if (b == 1) { if (ui_dirty) save(); ui_restart_game(); } break;
         case H_TRACK: {
             float my = g_my / S;
             if (my >= g_thumb_y && my < g_thumb_y + g_thumb_h) { drag_thumb = 1; drag_off = my - g_thumb_y; }
@@ -648,7 +687,7 @@ static void *key_thread(void *a)
 }
 
 // Scripted keys for unattended tests: RAVENGFX_UISCRIPT="t:keys,..." e.g. "60:o,62:dddr,64:e"
-// (o toggle, u/d/l/r arrows, e enter, x esc, t next tab), t = seconds after the first frame.
+// (o toggle, u/d/l/r arrows, e enter, x esc, t next tab, Q Quit button, R Restart button), t = seconds after the first frame.
 static void *script_thread(void *a)
 {
     char *s = strdup((const char *)a), *tok, *sp;
@@ -660,6 +699,12 @@ static void *script_thread(void *a)
         for (k++; *k; k++) {
             const char *m = "oudlrext"; const char *p = strchr(m, *k);
             if (p) { ui_key((int)(p - m)); fprintf(stderr, "[ravenui] script key %c\n", *k); usleep(150000); }
+            else if (*k == 'Q' || *k == 'R') {   // the Quit / Restart buttons
+                fprintf(stderr, "[ravenui] script %s\n", *k == 'Q' ? "quit" : "restart");
+                pthread_mutex_lock(&ui_lock);
+                if (*k == 'Q') ui_quit(); else { if (ui_dirty) save(); ui_restart_game(); }
+                pthread_mutex_unlock(&ui_lock);
+            }
         }
     }
     free(s);

@@ -19,6 +19,7 @@ fi
 # Ensure required runtime directory exists (NetworkInit fails if messages is missing or is a file)
 [ -f "$WS/pm/g7/halo/pmuser/messages" ] && rm -f "$WS/pm/g7/halo/pmuser/messages"
 mkdir -p "$WS/pm/g7/halo/pmuser/messages" "$OUT/run_logs" "$WS/pm/g7/dump"
+rm -f "$WS/pm/g7/dump/restart"
 
 PRELOAD="/pm/g7/halo/halo.so /pm/g7/rio2pad.so /pm/g7/ravengfx.so"
 
@@ -156,6 +157,8 @@ fi
   ${RIO2PAD_JSDIR:+--setenv RIO2PAD_JSDIR "$RIO2PAD_JSDIR"} \
   --setenv RIO2PAD_PROCLOG 1 \
   --setenv RAVEN_SHOTDIR "$WS/screenshots" \
+  --setenv RAVEN_PRESET_DIR "$OUT/presets" \
+  --setenv RAVEN_RESTART_FLAG /pm/g7/dump/restart \
   --setenv RIO2PAD_SKIPBOOT "${RIO2PAD_SKIPBOOT:-1}" \
   ${HALO_GAME:+--ro-bind "$HALO_GAME" /pm/g7/halo/game} \
   --setenv LIBGL_ALWAYS_SOFTWARE "${HALO_SW:-0}" \
@@ -172,3 +175,12 @@ fi
   --setenv LD_LIBRARY_PATH "/pm/g7/extralibs:/usr/lib/x86_64-linux-gnu:/usr/lib64:/usr/lib" \
   --chdir /pm/g7/halo \
   "${GFX_PREFIX[@]}" "${CMD[@]}" -f"$RES" -n "${GFX_ARGS[@]}" 2>&1 | tee "$OUT/run_logs/last_play.log"
+
+# F1 > Restart: the overlay leaves this flag and quits; start again with the saved settings.
+if [ -f "$WS/pm/g7/dump/restart" ]; then
+  rm -f "$WS/pm/g7/dump/restart"
+  kill $(jobs -p) 2>/dev/null || true
+  echo "[OpenRaven] Restarting (F1 > Restart)..."
+  unset RAVENGFX_UISCRIPT   # a test script runs once, not again after its own restart
+  exec "$OUT/play_halo.sh" "$@"
+fi

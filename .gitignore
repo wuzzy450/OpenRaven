@@ -33,3 +33,6 @@ runtime_imports.tsv
 # Notes / plans stay local, not on GitHub
 NEXT_STEPS*.md
 openraven/zip_report.txt
+
+# Your own settings (made from openraven/graphics.default.ini on first launch)
+openraven/graphics.ini

@@ -544,6 +544,10 @@ void ravengfx_install(void) {
     const char *conf = raven_env("RAVENGFX_CONF");
     if (conf && *conf) snprintf(ravengfx_conf_path, sizeof ravengfx_conf_path, "%s", conf);
     else snprintf(ravengfx_conf_path, sizeof ravengfx_conf_path, "%s/openraven/graphics.ini", g_root);
+    if (GetFileAttributesA(ravengfx_conf_path) == INVALID_FILE_ATTRIBUTES) {   // first launch: the player's own copy
+        char def[MAX_PATH * 2]; snprintf(def, sizeof def, "%s/openraven/graphics.default.ini", g_root);
+        CopyFileA(def, ravengfx_conf_path, TRUE);
+    }
     load_conf(ravengfx_conf_path);
     extern void display_detect(const char *);
     display_detect(ravengfx_conf_path);  // first launch only (autodetect = 1): HDR on/off + peak nits

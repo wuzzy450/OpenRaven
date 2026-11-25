@@ -188,8 +188,27 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS *ep) {
     ExitProcess(5);
 }
 
+// Environment as the launcher gave it, without RAVENLOADER_CHILD, taken before graphics.ini adds
+// its env vars. F1 Restart starts the new game with it, so the new run reads the saved settings
+// and does its own memory reservation (ravenui_win.c).
+wchar_t *raven_start_env;
+static void save_start_env(void)
+{
+    wchar_t *e = GetEnvironmentStringsW(), *p;
+    size_t n = 0;
+    for (p = e; *p; p += wcslen(p) + 1) ;
+    n = (size_t)(p - e) + 1;
+    wchar_t *out = malloc(n * sizeof *out), *o = out;
+    for (p = e; *p; p += wcslen(p) + 1)
+        if (_wcsnicmp(p, L"RAVENLOADER_CHILD=", 18)) { wcscpy(o, p); o += wcslen(p) + 1; }
+    *o = 0;
+    FreeEnvironmentStringsW(e);
+    raven_start_env = out;
+}
+
 int main(int argc, char **argv) {
     if (!getenv("RAVENLOADER_CHILD")) return relaunch_with_reservation();
+    save_start_env();
     // Real pixels, not Windows display scaling (otherwise 4K at 225% reports 1707x960).
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     // No argument (double-click): the game folder is two levels above the exe (<game>/openraven/win).
